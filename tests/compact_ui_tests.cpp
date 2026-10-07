@@ -19,6 +19,9 @@ int main(int argc,char** argv){
         RECT client{};GetClientRect(hwnd,&client);
         require(app.visibleRows()*panel_layout::fileRowHeight>client.bottom/app.scale*.70f,"compact files must use the freed header/footer space");
         float pathX=panel_layout::nameEnd(client.right/app.scale,false)+20;
+        auto width=client.right/app.scale;
+        require(panel_layout::column(panel_layout::typeEnd(width)+10,width,false)==panel_layout::FileColumn::Size,"default file list includes a size column");
+        require(panel_layout::column(panel_layout::sizeEnd(width)+10,width,false)==panel_layout::FileColumn::Modified,"default file list includes modification time");
         require(panel_layout::doubleClick(45,client.right/app.scale,false)==panel_layout::DoubleClick::Locate,"name double click must dispatch location rather than open");
         require(panel_layout::doubleClick(pathX,client.right/app.scale,false)==panel_layout::DoubleClick::CopyPath,"path double click dispatch");
         if(isolated){

@@ -183,15 +183,17 @@ static void sortedSearchTests(const fs::path& data) {
     desk::search_detail::registerShortGrams(db);
     require(sqlite3_exec(db,"INSERT INTO search_roots(id,path,path_key,complete) VALUES(1,'c:\\fixture','c:\\fixture',1); BEGIN",nullptr,nullptr,nullptr)==SQLITE_OK,"sort fixture setup failed");
     sqlite3_stmt* statement=nullptr;
-    require(sqlite3_prepare_v2(db,"INSERT INTO files(root_id,path,path_fold,name,name_fold,folder,size,seen) VALUES(1,?1,?2,?3,?4,0,?5,1)",-1,&statement,nullptr)==SQLITE_OK,"sort fixture statement failed");
+    require(sqlite3_prepare_v2(db,"INSERT INTO files(root_id,path,path_fold,name,name_fold,folder,size,seen,modified) VALUES(1,?1,?2,?3,?4,0,?5,1,?6)",-1,&statement,nullptr)==SQLITE_OK,"sort fixture statement failed");
     std::vector<desk::SearchItem> rows;
     constexpr int total=2307;
     for(int i=0;i<total;++i) {
         auto number=std::to_wstring((i*73)%total);number=std::wstring(4-number.size(),L'0')+number;
         auto name=std::wstring(i%2 ? L"report-" : L"Report-")+number+(i%3==0 ? L".txt" : i%3==1 ? L".png" : L".mp3");
         desk::SearchItem item;item.id=i+1;item.name=name;item.path=L"c:\\fixture\\g"+std::to_wstring(i%11)+L"\\"+name;item.size=(i*13)%997;
+        item.modified=133000000000000000ULL+(i%17)*10000000ULL;
         auto bind=[&](int index,const std::wstring& value) {auto bytes=fixtureUtf8(value);sqlite3_bind_text(statement,index,bytes.data(),static_cast<int>(bytes.size()),SQLITE_TRANSIENT);};
         bind(1,item.path);bind(2,lowerAscii(item.path));bind(3,name);bind(4,lowerAscii(name));sqlite3_bind_int64(statement,5,item.size);
+        sqlite3_bind_int64(statement,6,(int64_t)item.modified);
         require(sqlite3_step(statement)==SQLITE_DONE,"global sort fixture insertion failed");sqlite3_reset(statement);sqlite3_clear_bindings(statement);rows.push_back(std::move(item));
     }
     sqlite3_finalize(statement);
@@ -206,7 +208,7 @@ static void sortedSearchTests(const fs::path& data) {
     while(desk::search_detail::backfillShortGrams(db,1024)) {}
     while(desk::search_detail::prepareSortIndexes(db,1024)) {}
     sqlite3_close(db);
-    for(auto sort:{desk::SearchSort::Name,desk::SearchSort::Path,desk::SearchSort::Size,desk::SearchSort::Type,desk::SearchSort::Id}) for(bool descending:{false,true}) {
+    for(auto sort:{desk::SearchSort::Name,desk::SearchSort::Path,desk::SearchSort::Size,desk::SearchSort::Type,desk::SearchSort::Id,desk::SearchSort::Modified}) for(bool descending:{false,true}) {
         auto expected=rows;
         std::sort(expected.begin(),expected.end(),[&](const auto& a,const auto& b) {
             int relation=0;
@@ -214,6 +216,10 @@ static void sortedSearchTests(const fs::path& data) {
                 bool knownA=a.sizeKnown && !a.folder,knownB=b.sizeKnown && !b.folder;
                 if(knownA!=knownB) return knownA;
                 if(knownA) relation=a.size<b.size ? -1 : a.size>b.size ? 1 : 0;
+            }
+            else if(sort==desk::SearchSort::Modified){
+                if((a.modified!=0)!=(b.modified!=0))return a.modified!=0;
+                relation=a.modified<b.modified?-1:a.modified>b.modified?1:0;
             }
             else if(sort!=desk::SearchSort::Id) {
                 auto ka=sort==desk::SearchSort::Name ? lowerAscii(a.name) : sort==desk::SearchSort::Path ? lowerAscii(a.path) : fixtureType(a);
@@ -230,6 +236,7 @@ static void sortedSearchTests(const fs::path& data) {
             for(const auto& item:actual) {
                 require(offset<expected.size() && item.id==expected[offset].id,"full-set order/cursor differs from actual complete matching set");
                 require(item.sizeKnown==(expected[offset].sizeKnown && !expected[offset].folder),"unknown metadata was displayed as a real size");++offset;
+                require(item.modified==expected[offset-1].modified,"indexed modification time changed in a sorted projection");
             }
             if(actual.empty()) break;
             spec.after=actual.back();
@@ -419,6 +426,18 @@ int wmain(int argc, wchar_t** argv) {
             Child worker(L"--worker \"" + data.wstring() + L"\" \"" + root.wstring() + L"\" " + std::to_wstring(GetCurrentProcessId()));
             require(eventually([&] { return store.query(L"上海发票").size() == 1; }), "initial scan does not expose a real file");
             require(eventually([&] { return !store.status().building && store.status().total == 5; }), "scan never reaches a complete persistent snapshot");
+            WIN32_FILE_ATTRIBUTE_DATA attributes{};
+            require(GetFileAttributesExW((root/L"上海发票2026.txt").c_str(),GetFileExInfoStandard,&attributes)!=FALSE,"read fixture modification time");
+            auto indexed=store.query(L"上海发票");
+            require(indexed.front().modified==fileTicks(attributes.ftLastWriteTime)&&indexed.front().modified!=0,"index must expose actual file modification time");
+            auto datedFolders=store.query(L"type:folder");
+            require(!datedFolders.empty()&&datedFolders.front().modified!=0&&!datedFolders.front().sizeKnown,"folder has a timestamp and no real size");
+            const uint64_t changedTicks=fileTicks(attributes.ftLastWriteTime)+2400000000ULL;
+            FILETIME changed{(DWORD)changedTicks,(DWORD)(changedTicks>>32)};
+            HANDLE dateFile=CreateFileW((root/L"上海发票2026.txt").c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+            require(dateFile!=INVALID_HANDLE_VALUE&&SetFileTime(dateFile,nullptr,nullptr,&changed)!=FALSE,"change synthetic last-write timestamp");
+            CloseHandle(dateFile);
+            require(eventually([&]{auto items=store.query(L"上海发票");return items.size()==1&&items.front().modified==changedTicks;}),"last-write notification must refresh indexed time without renaming");
             require(store.query(L"财务").size() == 1, "two-character Chinese substring failed");
             require(store.query(L"务").size() == 1, "one-character Chinese substring failed");
             require(store.query(L"上海 2026").size() == 1, "multiple terms should intersect");

@@ -163,6 +163,9 @@ void click(HWND overlay, POINT point) {
     ScreenToClient(overlay, &point);
     SendMessageW(overlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
 }
+void hoverAt(HWND overlay,POINT point){
+    ScreenToClient(overlay,&point);SendMessageW(overlay,WM_MOUSEMOVE,0,MAKELPARAM(point.x,point.y));
+}
 void overlayTests() {
     HWND oldFocus = GetForegroundWindow();
     WNDCLASSEXW type{sizeof(type)}; type.hInstance = GetModuleHandleW(nullptr); type.lpfnWndProc = seedProc;
@@ -177,6 +180,22 @@ void overlayTests() {
     HWND overlay = FindWindowW(L"DeskEfficiencyCaptureOverlay", nullptr);
     check(overlay && desk::captureActive(), "overlay opens without blocking the message thread");
     if (overlay) {
+        hoverAt(overlay,{100,100});
+        const auto firstHover=desk::capture_detail::hoverInfo();
+        RECT expected{};GetWindowRect(seed,&expected);
+        check(!firstHover.selected&&EqualRect(&firstHover.region,&expected),"before clicking the hover outline matches the application window");
+        UpdateWindow(overlay);
+        hoverAt(overlay,{108,100});
+        const auto movedHover=desk::capture_detail::hoverInfo();
+        check(movedHover.pixel.x==108&&movedHover.pixel.y==100&&movedHover.rgb!=firstHover.rgb,
+              "moving within one window updates physical pixel coordinates and original RGB");
+        check(GetUpdateRect(overlay,nullptr,FALSE)!=FALSE,"same-window pointer movement repaints the pixel information");
+        HWND other=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,type.lpszClassName,L"Second synthetic application",WS_POPUP,480,80,300,240,nullptr,nullptr,type.hInstance,nullptr);
+        ShowWindow(other,SW_SHOWNOACTIVATE);UpdateWindow(other);
+        hoverAt(overlay,{500,100});
+        const auto secondHover=desk::capture_detail::hoverInfo();GetWindowRect(other,&expected);
+        check(!secondHover.selected&&EqualRect(&secondHover.region,&expected),"hover outline follows another application before the first click");
+        DestroyWindow(other);
         desk::beginCapture(nullptr, [](HBITMAP bitmap, const std::wstring&) { DeleteObject(bitmap); });
         check(FindWindowW(L"DeskEfficiencyCaptureOverlay", nullptr) == overlay, "duplicate capture reuses the active overlay");
         drag(overlay, {100, 100}, {260, 210});

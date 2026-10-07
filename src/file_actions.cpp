@@ -181,6 +181,14 @@ std::wstring fileSizeLabel(uint64_t bytes){
     do{value/=1024;++unit;}while(value>=1024&&unit<3);
     std::wostringstream text;text<<std::fixed<<std::setprecision(value>=100?0:1)<<value<<L" "<<units[unit];return text.str();
 }
+std::wstring fileModifiedLabel(uint64_t utcFileTime){
+    if(!utcFileTime)return L"—";
+    FILETIME stamp{(DWORD)utcFileTime,(DWORD)(utcFileTime>>32)};
+    SYSTEMTIME utc{},local{};
+    if(!FileTimeToSystemTime(&stamp,&utc)||!SystemTimeToTzSpecificLocalTimeEx(nullptr,&utc,&local))return L"—";
+    wchar_t value[32]{};swprintf_s(value,L"%04u/%02u/%02u %02u:%02u",local.wYear,local.wMonth,local.wDay,local.wHour,local.wMinute);
+    return value;
+}
 HBITMAP loadImageBitmap(const std::filesystem::path& path) {
     auto initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);bool uninitialize=SUCCEEDED(initialized);
     ComPtr<IWICImagingFactory> factory;ComPtr<IWICBitmapDecoder> decoder;ComPtr<IWICBitmapFrameDecode> frame;ComPtr<IWICFormatConverter> converter;

@@ -3,7 +3,7 @@
 Build signed Windows archives locally; signing keys stay in the certificate store.
 #>
 param(
-    [string]$Version='0.3.2.1',
+    [string]$Version='0.3.3.0',
     [string]$CertificateThumbprint='5E73D2B83E4733BB81072695B845044028283DA4',
     [string]$BuildRoot='',
     [string]$OutputDirectory='',
@@ -47,7 +47,7 @@ foreach($architecture in @('x64','x86','ARM64')){
     $docs=Join-Path $portable 'docs'
     New-Item -ItemType Directory -Force -Path (Join-Path $docs 'images') | Out-Null
     foreach($name in @('USER_GUIDE.zh-CN.md','USER_GUIDE.en-US.md','DEVELOPMENT.md','PERFORMANCE.md')){Copy-Item -LiteralPath (Join-Path $root "docs/$name") -Destination $docs}
-    foreach($name in @('files','clipboard','clipboard-preview','capture','ocr','translation','pin','scrolling','recording')){Copy-Item -LiteralPath (Join-Path $root "docs/images/$name.png") -Destination (Join-Path $docs 'images')}
+    foreach($name in @('files','clipboard','clipboard-preview','capture','capture-hover','ocr','translation','pin','scrolling','recording')){Copy-Item -LiteralPath (Join-Path $root "docs/images/$name.png") -Destination (Join-Path $docs 'images')}
     @"
 DeskFlow $releaseVersion — Windows $architecture
 

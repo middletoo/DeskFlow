@@ -230,6 +230,12 @@ void execute(sqlite3* db, const char* sql) {
 }
 struct Database {
     sqlite3* value = nullptr;
+    bool modifiedAvailable = false;
+    void refreshModifiedSchema() {
+        if(modifiedAvailable)return;
+        Statement columns(value,"PRAGMA table_info(files)");
+        while(columns.row())if(std::string(reinterpret_cast<const char*>(sqlite3_column_text(columns.value,1)))=="modified")modifiedAvailable=true;
+    }
     explicit Database(const fs::path& directory, int cacheKiB,bool queryReader=false) {
         fs::create_directories(directory);
         auto path=directory / L"files.db";
@@ -247,6 +253,7 @@ struct Database {
             sqlite3_busy_timeout(value,80);search_detail::registerShortGrams(value);
             execute(value,"PRAGMA temp_store=FILE;PRAGMA mmap_size=0;");
             execute(value,("PRAGMA cache_size=-"+std::to_string(cacheKiB)).c_str());
+            refreshModifiedSchema();
             return;
         }
         sqlite3_busy_timeout(value, 5000);
@@ -283,6 +290,11 @@ struct Database {
         ensureColumn("files","type_key","TEXT NOT NULL DEFAULT ''");
         if(ensureColumn("files","type_ready","INTEGER NOT NULL DEFAULT 0")) execute(value,"UPDATE search_meta SET value='0' WHERE key IN('type_complete','type_cursor','sort_type')");
         if(ensureColumn("files","size_known","INTEGER NOT NULL DEFAULT 0")) execute(value,"UPDATE search_meta SET value='0' WHERE key IN('size_complete','size_cursor','sort_size')");
+        ensureColumn("files","modified","INTEGER NOT NULL DEFAULT 0");
+        modifiedAvailable=true;
+        execute(value,"INSERT OR IGNORE INTO search_meta VALUES('modified_complete','0'),('modified_cursor','0'),('sort_modified','0');"
+            "CREATE TRIGGER IF NOT EXISTS files_modified_insert AFTER INSERT ON files WHEN new.modified=0 BEGIN UPDATE search_meta SET value='0' WHERE key='modified_complete'; UPDATE search_meta SET value=min(CAST(value AS INTEGER),new.id-1) WHERE key='modified_cursor'; END;"
+            "CREATE TRIGGER IF NOT EXISTS files_modified_update AFTER UPDATE OF modified ON files WHEN old.modified<>new.modified BEGIN UPDATE search_meta SET value=CAST(value AS INTEGER)+1 WHERE key='files_revision'; UPDATE search_meta SET value='0' WHERE key='modified_complete' AND new.modified=0; UPDATE search_meta SET value=min(CAST(value AS INTEGER),new.id-1) WHERE key='modified_cursor' AND new.modified=0; END;");
         execute(value,
             "CREATE VIRTUAL TABLE IF NOT EXISTS files_short USING fts5(grams,content='',detail=none,tokenize='ascii');"
             "CREATE TRIGGER IF NOT EXISTS files_short_insert AFTER INSERT ON files BEGIN INSERT INTO files_short(rowid,grams) VALUES(new.id,desk_shortgrams(new.name_fold)); UPDATE files SET short_ready=1 WHERE id=new.id; END;"
@@ -314,13 +326,14 @@ void meta(sqlite3* db, const char* key, const std::wstring& value) {
     statement.bytes(1, key); statement.text(2, value); statement.run();
 }
 void upsert(sqlite3* db, int64_t rootId, const std::wstring& path, const std::wstring& name,
-            DWORD attributes, uint64_t size, int64_t stamp, uint64_t frn = 0,bool sizeKnown=true) {
-    Statement statement(db, "INSERT INTO files(root_id,frn,path,path_fold,name,name_fold,folder,size,seen,size_known) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(root_id,path_fold) DO UPDATE SET frn=coalesce(excluded.frn,files.frn),path=excluded.path,name=excluded.name,name_fold=excluded.name_fold,folder=excluded.folder,size=excluded.size,size_known=excluded.size_known,seen=max(files.seen,excluded.seen)");
+            DWORD attributes, uint64_t size, int64_t stamp, uint64_t frn = 0,bool sizeKnown=true,uint64_t modified=0) {
+    Statement statement(db, "INSERT INTO files(root_id,frn,path,path_fold,name,name_fold,folder,size,seen,size_known,modified) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(root_id,path_fold) DO UPDATE SET frn=coalesce(excluded.frn,files.frn),path=excluded.path,name=excluded.name,name_fold=excluded.name_fold,folder=excluded.folder,size=excluded.size,size_known=excluded.size_known,modified=excluded.modified,seen=max(files.seen,excluded.seen)");
     statement.number(1, rootId);
     if (frn) statement.number(2, static_cast<int64_t>(frn)); else sqlite3_bind_null(statement.value, 2);
     statement.text(3, path); statement.text(4, fold(path)); statement.text(5, name); statement.text(6, fold(name));
     statement.number(7, (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0); statement.number(8, static_cast<int64_t>(size)); statement.number(9, stamp);
     statement.number(10,(attributes&FILE_ATTRIBUTE_DIRECTORY) ? 0 : sizeKnown);
+    statement.number(11,(int64_t)modified);
     statement.run();
 }
 std::wstring subtreePrefix(const std::wstring& path) { return fold(path) + (path.back() == L'\\' ? L"" : L"\\"); }
@@ -448,7 +461,8 @@ std::wstring ftsQuote(const std::wstring& token) {
     return result+L"\"";
 }
 
-struct DirectoryEntry { std::wstring name; DWORD attributes = 0; uint64_t size = 0, frn = 0; };
+uint64_t fileTicks(FILETIME value){return (uint64_t(value.dwHighDateTime)<<32)|value.dwLowDateTime;}
+struct DirectoryEntry { std::wstring name; DWORD attributes = 0; uint64_t size = 0, frn = 0, modified=0; };
 struct DirectoryReader {
     Handle handle;
     HANDLE fallback = INVALID_HANDLE_VALUE;
@@ -473,7 +487,7 @@ struct DirectoryReader {
         if (fallback != INVALID_HANDLE_VALUE) {
             if (!fallbackFirst && !FindNextFileW(fallback,&fallbackData)) { error=GetLastError(); ended=true; return false; }
             fallbackFirst=false;
-            entry={fallbackData.cFileName,fallbackData.dwFileAttributes,(static_cast<uint64_t>(fallbackData.nFileSizeHigh)<<32)|fallbackData.nFileSizeLow,0};
+            entry={fallbackData.cFileName,fallbackData.dwFileAttributes,(static_cast<uint64_t>(fallbackData.nFileSizeHigh)<<32)|fallbackData.nFileSizeLow,0,fileTicks(fallbackData.ftLastWriteTime)};
             return true;
         }
         if (offset == std::numeric_limits<size_t>::max()) {
@@ -491,6 +505,7 @@ struct DirectoryReader {
         auto* row = reinterpret_cast<FILE_ID_BOTH_DIR_INFO*>(buffer.data()+offset);
         entry.name.assign(row->FileName,row->FileNameLength/sizeof(wchar_t));
         entry.attributes=row->FileAttributes; entry.size=static_cast<uint64_t>(row->EndOfFile.QuadPart); entry.frn=static_cast<uint64_t>(row->FileId.QuadPart);
+        entry.modified=(uint64_t)row->LastWriteTime.QuadPart;
         offset = row->NextEntryOffset ? offset+row->NextEntryOffset : std::numeric_limits<size_t>::max();
         return true;
     }
@@ -675,7 +690,7 @@ public:
         for(const auto& volume:roots) if(volume.phase==NtfsPhase::Enumerate || volume.phase==NtfsPhase::Materialize) return true;
         Statement dirty(database.value,"SELECT 1 FROM ntfs_refresh LIMIT 1");if(dirty.row()) return true;
         Statement grams(database.value,"SELECT 1 FROM search_meta WHERE key='short_complete' AND value='0'");if(grams.row()) return true;
-        Statement sorting(database.value,"SELECT 1 FROM search_meta WHERE key IN('sort_name','sort_path','sort_size','sort_type','size_complete') AND value='0' LIMIT 1");if(sorting.row()) return true;
+        Statement sorting(database.value,"SELECT 1 FROM search_meta WHERE key IN('sort_name','sort_path','sort_size','sort_type','size_complete','sort_modified','modified_complete') AND value='0' LIMIT 1");if(sorting.row()) return true;
         Statement jobs(database.value,"SELECT 1 FROM scan_jobs LIMIT 1"); return jobs.row();
     }
     bool tryNtfs(Root& volume) {
@@ -764,7 +779,7 @@ public:
         bool known=false;
         WIN32_FILE_ATTRIBUTE_DATA actual{};
         if(GetFileAttributesExW(extended(*path).c_str(),GetFileExInfoStandard,&actual)) {attributes=actual.dwFileAttributes;size=(static_cast<uint64_t>(actual.nFileSizeHigh)<<32)|actual.nFileSizeLow;known=true;}
-        upsert(database.value,volume.id,*path,name,attributes,size,stamp,file,known);
+        upsert(database.value,volume.id,*path,name,attributes,size,stamp,file,known,known?fileTicks(actual.ftLastWriteTime):0);
     }
     void refresh(Root& volume,uint64_t file,int64_t stamp) {
         Statement insert(database.value,"INSERT INTO ntfs_refresh VALUES(?1,?2,?3) ON CONFLICT(root_id,frn) DO UPDATE SET stamp=max(stamp,excluded.stamp)");
@@ -799,7 +814,7 @@ public:
             auto linked=volume.path.substr(0,2)+std::wstring(name.c_str());
             if(!ownIndexPath(linked)) {
                 WIN32_FILE_ATTRIBUTE_DATA actual{};
-                if(GetFileAttributesExW(extended(linked).c_str(),GetFileExInfoStandard,&actual)) upsert(database.value,volume.id,linked,fs::path(linked).filename().wstring(),actual.dwFileAttributes,(static_cast<uint64_t>(actual.nFileSizeHigh)<<32)|actual.nFileSizeLow,stamp,file);
+                if(GetFileAttributesExW(extended(linked).c_str(),GetFileExInfoStandard,&actual)) upsert(database.value,volume.id,linked,fs::path(linked).filename().wstring(),actual.dwFileAttributes,(static_cast<uint64_t>(actual.nFileSizeHigh)<<32)|actual.nFileSizeLow,stamp,file,true,fileTicks(actual.ftLastWriteTime));
             }
             capacity=static_cast<DWORD>(name.size());
         } while(FindNextFileNameW(links,&capacity,name.data()));
@@ -950,13 +965,14 @@ public:
             WIN32_FILE_ATTRIBUTE_DATA current{};
             if(GetFileAttributesExW(extended(path).c_str(),GetFileExInfoStandard,&current)) {
                 item.attributes=current.dwFileAttributes;item.size=(static_cast<uint64_t>(current.nFileSizeHigh)<<32)|current.nFileSizeLow;
+                item.modified=fileTicks(current.ftLastWriteTime);
             } else {
                 DWORD failure=GetLastError();
                 if(failure==ERROR_FILE_NOT_FOUND || failure==ERROR_PATH_NOT_FOUND) continue;
                 // Directory enumeration already supplied metadata. A later
                 // attribute denial must not hide the visible entry itself.
             }
-            upsert(database.value,scan.rootId,path,item.name,item.attributes,item.size,scan.stamp,item.frn);
+            upsert(database.value,scan.rootId,path,item.name,item.attributes,item.size,scan.stamp,item.frn,true,item.modified);
             if(auto* volume=root(scan.rootId);volume && volume->phase!=NtfsPhase::Directory) {
                 node(scan.rootId,item.frn,scan.directory->parentFrn,item.name,(item.attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,scan.stamp,item.attributes);
                 volume->clearCache();
@@ -986,7 +1002,7 @@ public:
             eraseDescendants(database.value,rootId,path);
             if(active && active->rootId==rootId && active->directory && under(active->path,path)) active->directory.reset();
         }
-        upsert(database.value,rootId,path,name,information.dwFileAttributes,(static_cast<uint64_t>(information.nFileSizeHigh)<<32)|information.nFileSizeLow,epoch());
+        upsert(database.value,rootId,path,name,information.dwFileAttributes,(static_cast<uint64_t>(information.nFileSizeHigh)<<32)|information.nFileSizeLow,epoch(),0,true,fileTicks(information.ftLastWriteTime));
         if((action==FILE_ACTION_ADDED || action==FILE_ACTION_RENAMED_NEW_NAME) && (information.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) && !(information.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) schedule(rootId,path);
     }
     void notifications() {
@@ -1132,6 +1148,7 @@ bool prepareSortIndexes(sqlite3* database,size_t limit) {
     for(const auto& entry:std::vector<std::pair<const char*,const char*>>{
         {"sort_name","CREATE INDEX IF NOT EXISTS files_sort_name ON files(name_fold,id)"},
         {"sort_path","CREATE INDEX IF NOT EXISTS files_sort_path ON files(path_fold,id)"},
+        {"sort_modified","CREATE INDEX IF NOT EXISTS files_sort_modified_asc ON files((modified>0) DESC,modified,id); CREATE INDEX IF NOT EXISTS files_sort_modified_desc ON files((modified>0) DESC,modified DESC,id DESC)"},
         {"sort_size","CREATE INDEX IF NOT EXISTS files_sort_size_asc ON files(size_known DESC,(CASE WHEN size_known=1 THEN size ELSE 0 END),id); CREATE INDEX IF NOT EXISTS files_sort_size_desc ON files(size_known DESC,(CASE WHEN size_known=1 THEN size ELSE 0 END) DESC,id DESC)"}}) {
         if(!flag(entry.first)) {Transaction transaction(database);execute(database,entry.second);meta(database,entry.first,L"1");transaction.commit();return true;}
     }
@@ -1173,6 +1190,28 @@ bool backfillFileSizes(sqlite3* database,size_t limit) {
     }
     transaction.commit();return true;
 }
+bool backfillModified(sqlite3* database,size_t limit) {
+    Statement state(database,"SELECT key,value FROM search_meta WHERE key IN('modified_complete','modified_cursor')");
+    bool done=false;int64_t cursor=0;
+    while(state.row()){auto key=std::string((const char*)sqlite3_column_text(state.value,0));if(key=="modified_complete")done=sqlite3_column_int(state.value,1)!=0;else cursor=sqlite3_column_int64(state.value,1);}
+    if(done)return false;
+    Statement rows(database,("SELECT id,path FROM files WHERE id>?1 AND modified=0 ORDER BY id LIMIT "+std::to_string(std::min<size_t>(limit,128))).c_str());rows.number(1,cursor);
+    std::vector<std::pair<int64_t,std::wstring>> batch;
+    while(rows.row())batch.emplace_back(sqlite3_column_int64(rows.value,0),wide(sqlite3_column_text(rows.value,1)));
+    Transaction transaction(database);
+    if(batch.empty())meta(database,"modified_complete",L"1");
+    else{
+        Statement update(database,"UPDATE files SET modified=?2 WHERE id=?1");
+        for(const auto& entry:batch){
+            WIN32_FILE_ATTRIBUTE_DATA information{};
+            if(GetFileAttributesExW(extended(entry.second).c_str(),GetFileExInfoStandard,&information)){
+                update.number(1,entry.first);update.number(2,(int64_t)fileTicks(information.ftLastWriteTime));update.run();sqlite3_reset(update.value);sqlite3_clear_bindings(update.value);
+            }
+        }
+        meta(database,"modified_cursor",std::to_wstring(batch.back().first));
+    }
+    transaction.commit();return true;
+}
 }
 
 namespace {
@@ -1194,17 +1233,20 @@ struct SortCursor {bool valid=false;int64_t id=0,value=0;bool known=false;std::w
 struct SortInfo {
     SearchSort kind;
     bool descending;
-    std::string key,index,metaKey,order;
-    SortInfo(const SearchQuery& query,bool typeComplete) : kind(query.sort),descending(query.descending) {
+    std::string key,index,metaKey,order,knownKey="f.size_known";
+    bool grouped()const{return kind==SearchSort::Size||kind==SearchSort::Modified;}
+    bool numeric()const{return kind==SearchSort::Size||kind==SearchSort::Modified||kind==SearchSort::Id;}
+    SortInfo(const SearchQuery& query,bool typeComplete,bool modifiedAvailable=true) : kind(query.sort),descending(query.descending) {
         auto direction=descending ? " DESC" : " ASC";
         switch(kind) {
         case SearchSort::Name:key="f.name_fold";index="files_sort_name";metaKey="sort_name";break;
         case SearchSort::Path:key="f.path_fold";index="files_sort_path";metaKey="sort_path";break;
         case SearchSort::Size:key="(CASE WHEN f.size_known=1 THEN f.size ELSE 0 END)";index=descending ? "files_sort_size_desc" : "files_sort_size_asc";metaKey="sort_size";break;
         case SearchSort::Type:key=typeComplete ? "f.type_key" : "desk_typekey(f.name_fold,f.folder)";index="files_sort_type";metaKey="sort_type";break;
+        case SearchSort::Modified:key=modifiedAvailable?"f.modified":"CAST(0 AS INTEGER)";knownKey="("+key+">0)";index=descending?"files_sort_modified_desc":"files_sort_modified_asc";metaKey="sort_modified";break;
         default:key="f.id";break;
         }
-        order=(kind==SearchSort::Size ? std::string("f.size_known DESC,") : std::string{})+key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
+        order=(grouped()?knownKey+" DESC,":std::string{})+key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
     }
     SortCursor cursor(const SearchItem& item) const {
         SortCursor result;result.valid=item.id>0;result.id=item.id;
@@ -1213,6 +1255,7 @@ struct SortInfo {
         case SearchSort::Path:result.text=fold(item.path);break;
         case SearchSort::Type:result.text=typeKey(item);break;
         case SearchSort::Size:result.known=item.sizeKnown && !item.folder;result.value=result.known ? static_cast<int64_t>(item.size) : 0;break;
+        case SearchSort::Modified:result.known=item.modified!=0;result.value=(int64_t)item.modified;break;
         default:result.value=item.id;break;
         }
         return result;
@@ -1224,17 +1267,17 @@ struct SortInfo {
         auto idComparison=std::string(comparison)+(inclusive ? "=" : "");
         auto id=binds.number(cursor.id);
         if(kind==SearchSort::Id) return "f.id"+idComparison+id;
-        auto value=kind==SearchSort::Size ? binds.number(cursor.value) : binds.text(cursor.text);
+        auto value=numeric()?binds.number(cursor.value):binds.text(cursor.text);
         std::string condition="("+key+",f.id)"+idComparison+"("+value+","+id+")";
-        if(kind==SearchSort::Size && !withinGroup) {
+        if(grouped() && !withinGroup) {
             auto known=binds.number(cursor.known ? 1 : 0);
-            condition="(f.size_known"+std::string(reverse ? ">" : "<")+known+" OR (f.size_known="+known+" AND "+condition+"))";
+            condition="("+knownKey+std::string(reverse ? ">" : "<")+known+" OR ("+knownKey+"="+known+" AND "+condition+"))";
         }
         return condition;
     }
     std::string reversedOrder() const {
         auto direction=descending ? " ASC" : " DESC";
-        return (kind==SearchSort::Size ? std::string("f.size_known ASC,") : std::string{})+key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
+        return (grouped()?knownKey+" ASC,":std::string{})+key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
     }
 };
 struct ParsedSearch {Bindings binds;std::string where="1";std::wstring fts,shortFts,error;bool regex=false;};
@@ -1334,13 +1377,13 @@ ParsedSearch parseSearch(const SearchQuery& query,bool typeComplete) {
 }
 bool sameItem(const std::optional<SearchItem>& a,const std::optional<SearchItem>& b) {
     if(a.has_value()!=b.has_value()) return false;if(!a) return true;
-    return a->id==b->id && a->name==b->name && a->path==b->path && a->size==b->size && a->folder==b->folder && a->sizeKnown==b->sizeKnown;
+    return a->id==b->id && a->name==b->name && a->path==b->path && a->size==b->size && a->folder==b->folder && a->sizeKnown==b->sizeKnown && a->modified==b->modified;
 }
 bool sameQuery(const SearchQuery& a,const SearchQuery& b) {return a.text==b.text && a.sort==b.sort && a.descending==b.descending && a.matchCase==b.matchCase && a.matchPath==b.matchPath && sameItem(a.after,b.after);}
 SearchItem itemRow(sqlite3_stmt* row) {
-    SearchItem item;item.id=sqlite3_column_int64(row,0);item.name=wide(sqlite3_column_text(row,1));item.path=wide(sqlite3_column_text(row,2));item.folder=sqlite3_column_int(row,3)!=0;item.size=static_cast<uint64_t>(sqlite3_column_int64(row,4));item.sizeKnown=!item.folder && sqlite3_column_int(row,5)!=0;return item;
+    SearchItem item;item.id=sqlite3_column_int64(row,0);item.name=wide(sqlite3_column_text(row,1));item.path=wide(sqlite3_column_text(row,2));item.folder=sqlite3_column_int(row,3)!=0;item.size=static_cast<uint64_t>(sqlite3_column_int64(row,4));item.sizeKnown=!item.folder && sqlite3_column_int(row,5)!=0;item.modified=(uint64_t)sqlite3_column_int64(row,6);return item;
 }
-constexpr const char* itemProjection="f.id,f.name,f.path,f.folder,f.size,f.size_known";
+std::string itemProjection(bool modifiedAvailable){return std::string("f.id,f.name,f.path,f.folder,f.size,f.size_known,")+(modifiedAvailable?"f.modified":"CAST(0 AS INTEGER)");}
 }
 
 struct SearchStore::Impl {
@@ -1360,7 +1403,7 @@ struct SearchStore::Impl {
     bool sortedActive=false,sortedScan=false;
     SearchQuery sortedQuery;
     size_t sortedLimit=0,sortedChunk=2048;
-    int sortedSizeGroup=1;
+    int sortedKnownGroup=1;
     int64_t sortedVersion=0;
     SortCursor sortedCursor;
     std::vector<SearchItem> sortedResults;
@@ -1394,13 +1437,15 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
     {Statement state(db,"SELECT value FROM search_meta WHERE key='files_revision'");state.row();version=sqlite3_column_int64(state.value,0);}
     const bool continuing=wasPending && impl_->sortedActive && impl_->sortedLimit==limit && impl_->sortedVersion==version && sameQuery(impl_->sortedQuery,spec);
     const bool typeComplete=metaFlag(db,"type_complete");
-    SortInfo sort(spec,typeComplete);
+    impl_->database->refreshModifiedSchema();
+    const auto projectionItems=itemProjection(impl_->database->modifiedAvailable);
+    SortInfo sort(spec,typeComplete,impl_->database->modifiedAvailable);
     auto parsed=parseSearch(spec,typeComplete);
     if(!parsed.error.empty()) {impl_->queryMessage=parsed.error;impl_->sortedActive=false;return {};}
     if(!continuing) {
         impl_->sortedQuery=spec;impl_->sortedLimit=limit;impl_->sortedVersion=version;
         impl_->sortedCursor=spec.after ? sort.cursor(*spec.after) : SortCursor{};
-        impl_->sortedSizeGroup=spec.after && !impl_->sortedCursor.known ? 0 : 1;
+        impl_->sortedKnownGroup=spec.after && !impl_->sortedCursor.known ? 0 : 1;
         impl_->sortedResults.clear();impl_->sortedScan=false;impl_->sortedChunk=parsed.regex ? 64 : 2048;
     }
     impl_->sortedActive=true;
@@ -1437,7 +1482,7 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
                         auto binds=parsed.binds;std::string idList;
                         for(auto id:ids) {if(!idList.empty()) idList+=",";idList+=binds.number(id);}
                         auto cursor=spec.after ? sort.after(sort.cursor(*spec.after),binds) : "1";
-                        Statement statement(db,("SELECT "+std::string(itemProjection)+" FROM files f WHERE ("+parsed.where+") AND f.id IN("+idList+") AND "+cursor+" ORDER BY "+sort.order+" LIMIT "+std::to_string(limit)).c_str());
+                        Statement statement(db,("SELECT "+projectionItems+" FROM files f WHERE ("+parsed.where+") AND f.id IN("+idList+") AND "+cursor+" ORDER BY "+sort.order+" LIMIT "+std::to_string(limit)).c_str());
                         binds.bind(statement);collect(statement);
                     }
                 }
@@ -1453,27 +1498,27 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
                 while(result.size()<limit) {
                     if(progress(&budget)) {impl_->pending=true;break;}
                     Bindings boundaryBindings;
-                    auto start=sort.after(impl_->sortedCursor,boundaryBindings,false,false,sort.kind==SearchSort::Size);
-                    if(sort.kind==SearchSort::Size) start="f.size_known="+boundaryBindings.number(impl_->sortedSizeGroup)+" AND "+start;
-                    auto projection=sort.key+",f.id,f.size_known";
+                    auto start=sort.after(impl_->sortedCursor,boundaryBindings,false,false,sort.grouped());
+                    if(sort.grouped()) start=sort.knownKey+"="+boundaryBindings.number(impl_->sortedKnownGroup)+" AND "+start;
+                    auto projection=sort.key+",f.id,"+sort.knownKey;
                     Statement boundary(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.order+" LIMIT 1 OFFSET "+std::to_string(impl_->sortedChunk-1)).c_str());boundaryBindings.bind(boundary);
                     SortCursor end;
                     auto readCursor=[&](sqlite3_stmt* row) {
                         SortCursor value;value.valid=true;value.id=sqlite3_column_int64(row,1);value.known=sqlite3_column_int(row,2)!=0;
-                        if(sort.kind==SearchSort::Size || sort.kind==SearchSort::Id) value.value=sqlite3_column_int64(row,0);else value.text=wide(sqlite3_column_text(row,0));return value;
+                        if(sort.numeric()) value.value=sqlite3_column_int64(row,0);else value.text=wide(sqlite3_column_text(row,0));return value;
                     };
                     if(boundary.row()) end=readCursor(boundary.value);
                     else {
                         Statement last(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.reversedOrder()+" LIMIT 1").c_str());boundaryBindings.bind(last);
                         if(!last.row()) {
-                            if(sort.kind==SearchSort::Size && impl_->sortedSizeGroup==1) {impl_->sortedSizeGroup=0;impl_->sortedCursor={};continue;}
+                            if(sort.grouped() && impl_->sortedKnownGroup==1) {impl_->sortedKnownGroup=0;impl_->sortedCursor={};continue;}
                             break;
                         }
                         end=readCursor(last.value);
                     }
-                    auto binds=parsed.binds;auto lower=sort.after(impl_->sortedCursor,binds,false,false,sort.kind==SearchSort::Size),upper=sort.after(end,binds,true,true,sort.kind==SearchSort::Size);
-                    if(sort.kind==SearchSort::Size) lower="f.size_known="+binds.number(impl_->sortedSizeGroup)+" AND "+lower;
-                    Statement rows(db,("SELECT "+std::string(itemProjection)+" FROM "+table+" WHERE "+lower+" AND "+upper+" AND ("+parsed.where+") ORDER BY "+sort.order+" LIMIT "+std::to_string(limit-result.size())).c_str());
+                    auto binds=parsed.binds;auto lower=sort.after(impl_->sortedCursor,binds,false,false,sort.grouped()),upper=sort.after(end,binds,true,true,sort.grouped());
+                    if(sort.grouped()) lower=sort.knownKey+"="+binds.number(impl_->sortedKnownGroup)+" AND "+lower;
+                    Statement rows(db,("SELECT "+projectionItems+" FROM "+table+" WHERE "+lower+" AND "+upper+" AND ("+parsed.where+") ORDER BY "+sort.order+" LIMIT "+std::to_string(limit-result.size())).c_str());
                     binds.bind(rows);collect(rows);impl_->sortedCursor=end;
                 }
             }
@@ -1576,7 +1621,8 @@ std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit
         if(beforeId>0) clauses+=" AND files_fts.rowid<"+std::to_string(beforeId);
     }
     const std::string order=fullText.empty() ? "f.id" : "files_fts.rowid";
-    const std::string from="SELECT f.id,f.name,f.path,f.folder,f.size,f.size_known FROM files f "+joinSql;
+    impl_->database->refreshModifiedSchema();
+    const std::string from="SELECT "+itemProjection(impl_->database->modifiedAvailable)+" FROM files f "+joinSql;
     const std::string select=from+" WHERE "+clauses;
     bool newContinuation=false;
     if(hasShort) {
@@ -1597,7 +1643,7 @@ std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit
                 SearchItem item;
                 item.id=sqlite3_column_int64(statement.value,0);item.name=wide(sqlite3_column_text(statement.value,1));item.path=wide(sqlite3_column_text(statement.value,2));
                 item.folder=sqlite3_column_int(statement.value,3)!=0;item.size=static_cast<uint64_t>(sqlite3_column_int64(statement.value,4));
-                item.sizeKnown=!item.folder && sqlite3_column_int(statement.value,5)!=0;
+                item.sizeKnown=!item.folder && sqlite3_column_int(statement.value,5)!=0;item.modified=(uint64_t)sqlite3_column_int64(statement.value,6);
                 if(!hasShort || std::none_of(result.begin(),result.end(),[&](const SearchItem& existing){return existing.id==item.id;})) result.push_back(std::move(item));
             }
         };
@@ -1713,6 +1759,7 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
             working=search_detail::backfillShortGrams(indexer.database.value,256) || working;
             working=search_detail::prepareSortIndexes(indexer.database.value,256) || working;
             working=search_detail::backfillFileSizes(indexer.database.value,64) || working;
+            working=search_detail::backfillModified(indexer.database.value,64) || working;
             if(Clock::now()-published>=std::chrono::seconds(1) || (!working && indexer.scanning())) {indexer.publish();published=Clock::now();}
             std::vector<HANDLE> waits{stop.value};
             if(parent) waits.push_back(parent.value);

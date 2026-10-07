@@ -26,7 +26,7 @@ Hover over a top function entry to see its current hotkey. Change keys in Tools 
 
 Press Alt+Q and enter a filename. Spaces combine terms with AND, for example `report 2026`. Names are matched by default; enable full-path matching in Search to include parent directories. Use `ext:pdf`, `ext:pdf;docx`, `type:folder` or `in:C:\Demo` to narrow results. `*` and `?` are wildcards; `regex:` enables the supported basic expressions.
 
-Click column headers to sort. Name and directory are shown by default; optional type/size columns are in Search. Scrolling loads subsequent results, with a bounded row cache and disk checkpoints for revisiting earlier rows.
+Name, directory, size and local modification time are shown by default; folder size cells are empty. Headers sort the complete result set; the optional type column is in Search. Older indexes backfill timestamps in the background, and unavailable metadata shows “—”. Scrolling loads subsequent results with a bounded cache and disk checkpoints.
 
 - Double-click a name to reveal that file in Explorer.
 - Double-click its directory cell to copy the full file path, including its name.
@@ -64,6 +64,10 @@ Press Alt+S. Hover to select a window or drag a region. Rectangle, ellipse, arro
 | Pin / scrolling capture | P / L |
 | GIF / MP4 | G / M |
 | Cancel | Esc |
+
+![Window hover and pixel color](images/capture-hover.png)
+
+Before the first left click, the outline follows the application beneath the pointer. Click to select it or drag a custom region. The magnifier shows physical desktop pixel coordinates and the original screenshot's HEX color, refreshing within the same window. Ctrl+C at this stage copies the color and keeps the overlay open.
 
 ## Recognize text locally
 

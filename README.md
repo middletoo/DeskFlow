@@ -59,6 +59,8 @@ An independent disk index, read-only queries while indexing continues, global so
 
 独立磁盘索引，后台建库时仍可查询已有条目；支持完整集合排序、滚动续载及有界缓存。名称双击定位，目录双击复制完整文件路径，保留系统右键、多选、拖出、过滤和导出。
 
+Size and local modification time are always visible; folder size cells stay empty. Click either header to sort the complete result set. Older indexes backfill timestamps in the background. / 默认显示大小和本地修改时间，文件夹大小栏留空；点击列标题对完整结果排序，旧索引的时间元数据在后台补齐。
+
 ## Keep clipboard history on disk / 长期保留剪贴板历史
 
 ![Clipboard history / 剪贴板历史](docs/images/clipboard.png)
@@ -78,6 +80,10 @@ Click to preview content in a floating window; unsupported representations show 
 Window snapping, magnifier, adjustable regions, shapes, arrows, text, pen, mosaic and numbered annotations. A white grouped toolbar, red cancel cross and green copy check keep the editor compact.
 
 自动选窗、放大镜、选区调整、形状、箭头、文字、画笔、马赛克和序号标注。白色分组工具栏，红叉取消，绿色勾复制。
+
+![Window hover and pixel information / 自动选窗与像素信息](docs/images/capture-hover.png)
+
+Before clicking, the outline follows the application under the pointer. The magnifier updates physical pixel coordinates and HEX color even within the same window; Ctrl+C copies the color. Drag for a custom region or click to select the hovered window. / 按下左键前，选框跟随鼠标匹配应用窗口；同一窗口内移动也实时更新物理像素坐标和 HEX 色值，Ctrl+C 复制色值，单击选窗或拖动自定义选区。
 
 ## Local OCR / 本地文字识别
 

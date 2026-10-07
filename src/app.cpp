@@ -327,7 +327,7 @@ class Application {
             if (std::filesystem::exists(preferencePath) && std::filesystem::file_size(preferencePath) <= 64 * 1024) {
                 std::ifstream input(preferencePath);nlohmann::json prefs;input >> prefs;
                 int sort = prefs.value("sort", (int)SearchSort::Name);
-                if (sort >= 0 && sort <= (int)SearchSort::Id) fileQuery.sort = (SearchSort)sort;
+                if (sort >= 0 && sort <= (int)SearchSort::Modified) fileQuery.sort = (SearchSort)sort;
                 fileQuery.descending = prefs.value("descending", false);
                 fileQuery.matchCase = prefs.value("matchCase", false);
                 fileQuery.matchPath = prefs.value("matchPath", false);
@@ -403,7 +403,7 @@ class Application {
         else
             target->FillRectangle(r, brush.Get());
     }
-    void text(const std::wstring &s, D2D1_RECT_F r, float size, unsigned rgb, bool strong = false,bool wrap=true) {
+    void text(const std::wstring &s, D2D1_RECT_F r, float size, unsigned rgb, bool strong = false,bool wrap=true,bool rightAligned=false) {
         ComPtr<IDWriteTextFormat> f;
         writeFactory->CreateTextFormat(
             L"Segoe UI", nullptr, strong ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
@@ -411,6 +411,7 @@ class Application {
         if (!f)
             return;
         f->SetWordWrapping(wrap?DWRITE_WORD_WRAPPING_WRAP:DWRITE_WORD_WRAPPING_NO_WRAP);
+        if(rightAligned)f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         ComPtr<IDWriteInlineObject> ellipsis;
         writeFactory->CreateEllipsisTrimmingSign(f.Get(), &ellipsis);
         DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
@@ -758,10 +759,11 @@ class Application {
         AppendMenuW(menu,MF_STRING|(fileQuery.matchCase?MF_CHECKED:0),202,L"区分大小写");
         AppendMenuW(menu,MF_STRING|(fileRegex?MF_CHECKED:0),203,L"正则表达式");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        auto sorting=CreatePopupMenu();const wchar_t* sorts[]{L"名称",L"目录",L"大小",L"类型"};
-        for(int i=0;i<4;++i)AppendMenuW(sorting,MF_STRING|((int)fileQuery.sort==i?MF_CHECKED:0),301+i,sorts[i]);
+        auto sorting=CreatePopupMenu();const wchar_t* sorts[]{L"名称",L"目录",L"大小",L"类型",L"修改时间"};
+        const SearchSort sortKinds[]{SearchSort::Name,SearchSort::Path,SearchSort::Size,SearchSort::Type,SearchSort::Modified};
+        for(int i=0;i<5;++i)AppendMenuW(sorting,MF_STRING|(fileQuery.sort==sortKinds[i]?MF_CHECKED:0),301+i,sorts[i]);
         AppendMenuW(menu,MF_POPUP,(UINT_PTR)sorting,L"排序");
-        AppendMenuW(menu,MF_STRING|(fileDetailsVisible?MF_CHECKED:0),205,L"显示类型和大小列");
+        AppendMenuW(menu,MF_STRING|(fileDetailsVisible?MF_CHECKED:0),205,L"显示类型列");
         AppendMenuW(menu,MF_STRING|(filePreviewVisible?MF_CHECKED:0),204,L"浮动文件预览\tAlt+P");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,402,L"刷新\tF5");
         AppendMenuW(menu,MF_STRING,403,L"文件操作…");AppendMenuW(menu,MF_STRING,401,L"搜索语法与快捷键");
@@ -774,7 +776,7 @@ class Application {
         else if(action==203){fileRegex=!fileRegex;query(true);}
         else if(action==204)toggleFilePreview();
         else if(action==205){fileDetailsVisible=!fileDetailsVisible;saveFilePreferences();invalidate();}
-        else if(action>=301&&action<=304)changeFileSort((SearchSort)(action-301));
+        else if(action>=301&&action<=305)changeFileSort(sortKinds[action-301]);
         else if(action==402)query();else if(action==403)fileActionsMenu();
         else if (action == 401) MessageBoxW(window,
             L"空格：多个关键词\next:pdf;docx：扩展名\ntype:file / type:folder：文件或目录\n"
@@ -969,9 +971,9 @@ class Application {
             auto temporary=destination;temporary+=L".deskflow-"+std::to_wstring(GetCurrentProcessId())+L".pending";
             std::ofstream output(temporary,std::ios::binary|std::ios::trunc);output<<"\xEF\xBB\xBF";
             auto quote=[](const std::wstring& value){std::string out="\"";for(char ch:utf8(value)){out+=ch;if(ch=='\"')out+=ch;}return out+"\"";};
-            if(type==1)output<<"Name,Path,Type,SizeBytes\r\n";
+            if(type==1)output<<"Name,Path,Type,SizeBytes,ModifiedLocal\r\n";
             for(auto& row:rows){if(type==2)output<<utf8(row.path)<<"\r\n";
-                else output<<quote(row.name)<<","<<quote(row.path)<<","<<quote(row.folder?L"文件夹":std::filesystem::path(row.name).extension().wstring())<<","<<(row.sizeKnown?std::to_string(row.size):"")<<"\r\n";}
+                else output<<quote(row.name)<<","<<quote(row.path)<<","<<quote(row.folder?L"文件夹":std::filesystem::path(row.name).extension().wstring())<<","<<(!row.folder&&row.sizeKnown?std::to_string(row.size):"")<<","<<quote(row.modified?fileModifiedLabel(row.modified):L"")<<"\r\n";}
             output.close();
             if(!output||!MoveFileExW(temporary.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){
                 DeleteFileW(temporary.c_str());throw std::runtime_error("已加载结果导出失败，请检查目标目录与磁盘空间");}
@@ -981,11 +983,14 @@ class Application {
     }
     void paintFiles(float w,float h,unsigned card,unsigned fg,unsigned muted) {
         float right=w-8;
-        float nameEnd=panel_layout::nameEnd(w,fileDetailsVisible),pathEnd=panel_layout::pathEnd(w,fileDetailsVisible),typeEnd=w-84;
+        float nameEnd=panel_layout::nameEnd(w,fileDetailsVisible),pathEnd=panel_layout::pathEnd(w,fileDetailsVisible);
+        float typeEnd=panel_layout::typeEnd(w),sizeEnd=panel_layout::sizeEnd(w);
         auto label=[this](const wchar_t* name,SearchSort sort){return std::wstring(name)+(fileQuery.sort==sort?(fileQuery.descending?L" ↓":L" ↑"):L"");};
         menuButton(label(L"名称",SearchSort::Name),{8,70,nameEnd,95},[this]{changeFileSort(SearchSort::Name);});
         menuButton(label(L"目录",SearchSort::Path),{nameEnd,70,pathEnd,95},[this]{changeFileSort(SearchSort::Path);});
-        if(fileDetailsVisible){menuButton(label(L"类型",SearchSort::Type),{pathEnd,70,typeEnd,95},[this]{changeFileSort(SearchSort::Type);});menuButton(label(L"大小",SearchSort::Size),{typeEnd,70,right,95},[this]{changeFileSort(SearchSort::Size);});}
+        if(fileDetailsVisible)menuButton(label(L"类型",SearchSort::Type),{pathEnd,70,typeEnd,95},[this]{changeFileSort(SearchSort::Type);});
+        menuButton(label(L"大小",SearchSort::Size),{typeEnd,70,sizeEnd,95},[this]{changeFileSort(SearchSort::Size);});
+        menuButton(label(L"修改时间",SearchSort::Modified),{sizeEnd,70,right,95},[this]{changeFileSort(SearchSort::Modified);});
         rect({8,95,right,96},dark()?0x343842:0xe4e7ec);
         scroll=std::clamp(scroll,0,std::max(0,(int)fileRows.size()-visibleRows()));
         for(int i=scroll;i<std::min((int)fileRows.size(),scroll+visibleRows());i++) {
@@ -997,7 +1002,9 @@ class Application {
             text(std::filesystem::path(item.path).parent_path().wstring(),{nameEnd+10,y+4,pathEnd-8,y+25},13,fg,false,false);
             auto type=item.folder?L"文件夹":std::filesystem::path(item.name).extension().wstring();
             if(type.empty())type=L"文件";
-            if(fileDetailsVisible){text(type,{pathEnd+8,y+4,typeEnd-8,y+25},12,muted,false,false);text(item.folder||!item.sizeKnown?L"—":fileSizeLabel(item.size),{typeEnd+8,y+4,right-8,y+25},12,muted,false,false);}
+            if(fileDetailsVisible)text(type,{pathEnd+8,y+4,typeEnd-8,y+25},12,muted,false,false);
+            text(item.folder?L"":!item.sizeKnown?L"—":fileSizeLabel(item.size),{typeEnd+6,y+4,sizeEnd-10,y+25},12,fg,false,false,true);
+            text(fileModifiedLabel(item.modified),{sizeEnd+8,y+4,right-8,y+25},12,fg,false,false);
         }
         if(fileRows.empty()) {
             text(pendingQuery||listInFlight?L"搜索中…":L"没有匹配文件",{16,112,right-12,142},13,muted);

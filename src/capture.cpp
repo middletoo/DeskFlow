@@ -176,6 +176,7 @@ struct Overlay {
     HWND window{}, owner{}, previousForeground{}, edit{}; WNDPROC originalEditProc{}; UINT_PTR editGeneration{};
     HFONT editFont{}; HBRUSH editBrush{};
     bool ownerWasVisible{}, selected{}, busy{}, modalDialog{}, cursorKnown{}, imeComposing{}, originalPreview{}, translationFailed{};
+    bool pixelCopied=false;
     RECT screen{}, selection{}, hoverSelection{}, dragOriginal{}, toolbar{}; POINT down{}, cursor{};
     Tool tool{Tool::Select}; Drag drag{Drag::None}; int resizeEdges{}, hover{-1};
     float scale{1}; DWORD color{0xffff626d}; float thickness{3};
@@ -203,6 +204,20 @@ struct Overlay {
         if (cursorKnown) return cursor;
         POINT p{}; GetCursorPos(&p); ScreenToClient(window, &p);
         p.x = std::clamp<LONG>(p.x, 0, snapshot.width); p.y = std::clamp<LONG>(p.y, 0, snapshot.height); return p;
+    }
+    POINT samplePoint()const{
+        const auto point=mouse();
+        return {std::clamp<LONG>(point.x,0,snapshot.width-1),std::clamp<LONG>(point.y,0,snapshot.height-1)};
+    }
+    DWORD sampleRgb()const{auto point=samplePoint();return snapshot.pixels[(size_t)point.y*snapshot.width+point.x]&0xffffff;}
+    std::wstring sampleHex()const{wchar_t value[8]{};swprintf_s(value,L"#%06X",sampleRgb());return value;}
+    void copySample(){
+        const auto value=sampleHex();auto memory=GlobalAlloc(GMEM_MOVEABLE,(value.size()+1)*sizeof(wchar_t));
+        if(!memory)return;auto data=GlobalLock(memory);if(!data){GlobalFree(memory);return;}
+        memcpy(data,value.c_str(),(value.size()+1)*sizeof(wchar_t));GlobalUnlock(memory);
+        if(!OpenClipboard(window)){GlobalFree(memory);return;}
+        EmptyClipboard();const bool copied=SetClipboardData(CF_UNICODETEXT,memory)!=nullptr;CloseClipboard();
+        if(!copied)GlobalFree(memory);pixelCopied=copied;invalidate();
     }
     void eventCursor(LPARAM coordinates) {
         POINT p{GET_X_LPARAM(coordinates), GET_Y_LPARAM(coordinates)};
@@ -607,6 +622,7 @@ struct Overlay {
         originalEditProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(editProc))); SetFocus(edit);
     }
     void pointerDown() {
+        if(!selected)updateHover();
         const POINT point = mouse(); const int button = hitButton(point);
         if (busy && (button < 0 || buttons[button].action != Action::Cancel)) return;
         if (selected && !busy && !buttons.empty()) {
@@ -654,7 +670,7 @@ struct Overlay {
             } else { if (draft.points.size() == 1) draft.points.push_back(bounded); else draft.points.back() = bounded; }
             draft.box = pointRect(down, bounded); break;
         }
-        default: if (!selected) updateHover(); return;
+        default: if (!selected) {pixelCopied=false;updateHover();invalidate();} return;
         }
         layoutToolbar(); invalidate();
     }
@@ -690,6 +706,7 @@ struct Overlay {
             else close(); return;
         }
         if (busy || drag != Drag::None) return;
+        if((GetKeyState(VK_CONTROL)&0x8000)&&value=='C'){if(selected)copy();else copySample();return;}
         if (value == VK_SPACE && translatedSelected()) { originalPreview = true; invalidate(); return; }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && value == 'Z') { perform((GetKeyState(VK_SHIFT) & 0x8000) ? Action::Redo : Action::Undo); return; }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && value == 'Y') { perform(Action::Redo); return; }
@@ -876,13 +893,14 @@ void Overlay::render() {
             }
         }
         if (!busy && (!selected || drag == Drag::Select || drag == Drag::Resize)) {
-            const POINT p = mouse();
-            const float magW = 214 * scale, magH = 184 * scale;
+            const POINT p = samplePoint();
+            const float magW = 218 * scale, magH = 208 * scale;
             float mx = p.x + 24 * scale, my = p.y + 24 * scale;
             if (mx + magW > snapshot.width) mx = p.x - magW - 24 * scale;
             if (my + magH > snapshot.height) my = p.y - magH - 24 * scale;
             mx = std::clamp(mx, 0.0f, std::max(0.0f, snapshot.width - magW)); my = std::clamp(my, 0.0f, std::max(0.0f, snapshot.height - magH));
-            rounded(graphics, panel, {mx, my, magW, magH}, 10 * scale); graphics.Flush(Gdiplus::FlushIntentionSync);
+            Gdiplus::SolidBrush paper(Gdiplus::Color(255,255,255,255)),ink(Gdiplus::Color(255,38,43,51)),mutedInk(Gdiplus::Color(255,132,139,148));
+            rounded(graphics,paper,{mx,my,magW,magH},8*scale);graphics.Flush(Gdiplus::FlushIntentionSync);
             const int sourceW = std::min(17, snapshot.width), sourceH = std::min(17, snapshot.height);
             const int sx = std::clamp<int>(p.x - sourceW / 2, 0, snapshot.width - sourceW), sy = std::clamp<int>(p.y - sourceH / 2, 0, snapshot.height - sourceH);
             const int dx = static_cast<int>(mx + 8 * scale), dy = static_cast<int>(my + 8 * scale), dw = static_cast<int>(magW - 16 * scale), dh = static_cast<int>(110 * scale);
@@ -892,11 +910,12 @@ void Overlay::render() {
             Gdiplus::Pen cross(Gdiplus::Color(255, 84, 222, 177), scale);
             graphics.DrawLine(&cross, px, static_cast<float>(dy), px, static_cast<float>(dy + dh));
             graphics.DrawLine(&cross, static_cast<float>(dx), py, static_cast<float>(dx + dw), py);
-            const DWORD pixel = snapshot.pixels[static_cast<size_t>(std::clamp<LONG>(p.y, 0, snapshot.height - 1)) * snapshot.width + std::clamp<LONG>(p.x, 0, snapshot.width - 1)];
-            wchar_t hex[80]{}; swprintf_s(hex, L"#%06X   RGB %u, %u, %u", pixel & 0xffffff, (pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255);
-            graphics.DrawString(hex, -1, &font, Gdiplus::RectF(mx + 7 * scale, my + 120 * scale, magW - 14 * scale, 24 * scale), &center, &white);
-            const auto position = std::to_wstring(p.x + screen.left) + L", " + std::to_wstring(p.y + screen.top) + L" · 右键退回 / 退出";
-            graphics.DrawString(position.c_str(), -1, &font, Gdiplus::RectF(mx + 7 * scale, my + 146 * scale, magW - 14 * scale, 26 * scale), &center, &white);
+            const auto position=L"坐标   "+std::to_wstring(p.x+screen.left)+L", "+std::to_wstring(p.y+screen.top);
+            const auto value=L"色值   "+sampleHex();
+            graphics.DrawString(position.c_str(),-1,&font,Gdiplus::RectF(mx+8*scale,my+121*scale,magW-16*scale,23*scale),&center,&ink);
+            graphics.DrawString(value.c_str(),-1,&font,Gdiplus::RectF(mx+8*scale,my+146*scale,magW-16*scale,23*scale),&center,&ink);
+            const wchar_t* hint=pixelCopied?L"色值已复制":L"Ctrl+C 复制色值";
+            graphics.DrawString(hint,-1,&font,Gdiplus::RectF(mx+8*scale,my+174*scale,magW-16*scale,23*scale),&center,&mutedInk);
         }
         if (!selected || busy || !translationStatus.empty()) {
             POINT point = cursor; if (!point.x && !point.y) point = mouse();
@@ -1002,6 +1021,13 @@ bool copyBitmapToClipboard(HBITMAP bitmap) {
     DestroyWindow(clipboardOwner); if (memory) GlobalFree(memory); return success;
 }
 bool captureActive() { return activeWindow.load() != nullptr || scrollingCaptureActive(); }
+capture_detail::HoverInfo capture_detail::hoverInfo(){
+    HoverInfo result;auto state=image_tools_detail::windowState<Overlay>(activeWindow.load());
+    if(!state||!state->snapshot.pixels)return result;
+    result.region=state->selected?state->selection:state->hoverSelection;OffsetRect(&result.region,state->screen.left,state->screen.top);
+    result.pixel=state->samplePoint();result.pixel.x+=state->screen.left;result.pixel.y+=state->screen.top;
+    result.rgb=state->sampleRgb();result.selected=state->selected;return result;
+}
 void beginCapture(HWND owner, CaptureCallback callback, RegionCallback recordingCallback, InlineTranslation translation) {
     if (scrollingCaptureActive()) { beginScrollingCapture(owner, {}, {}); return; }
     if (captureActive()) { SetForegroundWindow(activeWindow.load()); return; }

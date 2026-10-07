@@ -27,4 +27,9 @@ HBITMAP captureRegion(RECT physicalScreenRect);
 // Atomic replacement after successful PNG encoding; source ownership is kept.
 bool saveBitmapPng(HBITMAP bitmap, const std::filesystem::path& path);
 bool copyBitmapToClipboard(HBITMAP bitmap);
+namespace capture_detail {
+// UI-thread diagnostic view; coordinates use physical virtual-desktop pixels.
+struct HoverInfo {RECT region{};POINT pixel{};DWORD rgb=0;bool selected=false;};
+HoverInfo hoverInfo();
+}
 }

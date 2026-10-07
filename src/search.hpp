@@ -20,8 +20,9 @@ struct SearchItem {
     bool folder = false;
     uint64_t size = 0;
     bool sizeKnown = true;
+    uint64_t modified = 0; // UTC Windows FILETIME; zero means unavailable.
 };
-enum class SearchSort { Name, Path, Size, Type, Id };
+enum class SearchSort { Name, Path, Size, Type, Id, Modified };
 struct SearchQuery {
     std::wstring text;
     SearchSort sort = SearchSort::Name;

@@ -9,6 +9,11 @@ int main() {
     auto folder=std::filesystem::temp_directory_path()/(L"DeskFlow-file-actions-"+std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(folder);
     try {
+        require(desk::fileModifiedLabel(0)==L"—","unknown modification time must not invent a date");
+        SYSTEMTIME known{};known.wYear=2026;known.wMonth=10;known.wDay=7;known.wHour=8;
+        FILETIME knownTime{};SystemTimeToFileTime(&known,&knownTime);
+        auto date=desk::fileModifiedLabel((uint64_t(knownTime.dwHighDateTime)<<32)|knownTime.dwLowDateTime);
+        require(date.size()==16&&date.substr(0,5)==L"2026/","modification time uses a compact local date/time");
         auto first=folder/L"你好 world.txt",second=folder/L"other file.txt";
         {std::ofstream file(first,std::ios::binary);file<<"\xEF\xBB\xBFHello preview \xE4\xBD\xA0\xE5\xA5\xBD";}
         {std::ofstream file(second);file<<"second";}

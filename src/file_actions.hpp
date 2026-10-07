@@ -25,4 +25,5 @@ FilePreview loadFilePreview(const std::filesystem::path& path,
                            const std::atomic_int* version = nullptr, int expected = 0);
 HBITMAP loadImageBitmap(const std::filesystem::path& path); // <=32MP, caller owns
 std::wstring fileSizeLabel(uint64_t bytes);
+std::wstring fileModifiedLabel(uint64_t utcFileTime);
 }
