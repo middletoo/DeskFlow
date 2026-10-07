@@ -4,6 +4,7 @@
 #include "capture.hpp"
 #include "translation.hpp"
 #include "settings.hpp"
+#include "github_icon.hpp"
 #include "accessibility.hpp"
 #include "file_actions.hpp"
 #include "image_tools.hpp"
@@ -245,7 +246,7 @@ class Application {
     HINSTANCE instance;
     HWND window = nullptr, edit = nullptr, resultEdit = nullptr, settingsWindow = nullptr;
     HWND menuTooltip=nullptr;
-    std::array<std::wstring,3> menuHints;
+    std::array<std::wstring,4> menuHints;
     float scale = 1;
     int mode = 0, selected = 0, scroll = 0, wheelRemainder = 0;
     bool paused = false, smoke = false;
@@ -294,6 +295,7 @@ class Application {
     std::wstring recordingWarning, hotkeyWarning;
     std::wstring historyFailure, searchFailure;
     ComPtr<ID2D1Factory> factory;
+    ComPtr<ID2D1PathGeometry> githubGeometry;
     ComPtr<IDWriteFactory> writeFactory;
     ComPtr<ID2D1RenderTarget> target;
     ComPtr<ID2D1DCRenderTarget> dcTarget;
@@ -351,6 +353,7 @@ class Application {
         }
         previousWindow = GetForegroundWindow();
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory.GetAddressOf());
+        if(factory)makeGithubGeometry(factory.Get(),githubGeometry.GetAddressOf());
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                             (IUnknown **)writeFactory.GetAddressOf());
     }
@@ -427,6 +430,21 @@ class Application {
         if(active)rect(bounds,dark()?0x303852:0xe8f1fb);
         text(label,{bounds.left+9,bounds.top+6,bounds.right-3,bounds.bottom-2},13,dark()?0xededf1:0x202735,false,false);
         buttons.push_back({bounds,std::move(action)});
+    }
+    void githubButton(float width){
+        const D2D1_RECT_F bounds{width-38,0,width-8,30};
+        if(githubGeometry){
+            D2D1_MATRIX_3X2_F previous{};target->GetTransform(&previous);
+            target->SetTransform(D2D1::Matrix3x2F::Scale(.75f,.75f)*
+                D2D1::Matrix3x2F::Translation(bounds.left+6,6)*previous);
+            brush->SetColor(color(dark()?0xededf1:0x24292f));target->FillGeometry(githubGeometry.Get(),brush.Get());
+            target->SetTransform(previous);
+        }
+        buttons.push_back({bounds,[this]{
+            if((INT_PTR)ShellExecuteW(window,L"open",githubProjectUrl,nullptr,nullptr,SW_SHOWNORMAL)<=32){
+                status=L"无法打开 GitHub 项目，请检查默认浏览器";invalidate();
+            }
+        }});
     }
     void publish(Result *r) {
         if (closing || !PostMessageW(window, DoneMessage, 0, (LPARAM)r))
@@ -538,6 +556,7 @@ class Application {
         menuButton(L"截图",{130,0,185,30},[this]{capture();},mode==2);
         menuButton(mode==1?L"剪辑":L"搜索",{193,0,248,30},[this]{if(mode==1)historyActionsMenu();else searchOptionsMenu();});
         menuButton(L"工具",{250,0,305,30},[this]{toolsMenu();});
+        githubButton(w);
         if(mode!=2){
             rect({8,35,w-8,63},dark()?0x343842:0xc7cbd2);
             rect({9,36,w-9,62},card);
@@ -659,12 +678,12 @@ class Application {
         updateTooltipRegions();
         invalidate();
     }
-    std::wstring functionHint(int index)const{const wchar_t* names[]{L"文件搜索",L"剪贴板历史",L"截图"};return std::wstring(names[index])+L"  "+hotkeyText(config.hotkeys[index]);}
-    void updateTooltipRegions(){if(!menuTooltip)return;const RECT logical[]{{4,0,59,30},{61,0,128,30},{130,0,185,30}};for(int i=0;i<3;++i){TOOLINFOW tool{sizeof(tool)};tool.hwnd=window;tool.uId=i+1;tool.rect={(LONG)(logical[i].left*scale),0,(LONG)(logical[i].right*scale),(LONG)(30*scale)};SendMessageW(menuTooltip,TTM_NEWTOOLRECTW,0,(LPARAM)&tool);}}
+    std::wstring functionHint(int index)const{if(index==3)return L"GitHub 项目";const wchar_t* names[]{L"文件搜索",L"剪贴板历史",L"截图"};return std::wstring(names[index])+L"  "+hotkeyText(config.hotkeys[index]);}
+    void updateTooltipRegions(){if(!menuTooltip)return;RECT client{};GetClientRect(window,&client);float width=client.right/scale;const RECT logical[]{{4,0,59,30},{61,0,128,30},{130,0,185,30},{(LONG)(width-38),0,(LONG)(width-8),30}};for(int i=0;i<4;++i){TOOLINFOW tool{sizeof(tool)};tool.hwnd=window;tool.uId=i+1;tool.rect={(LONG)(logical[i].left*scale),0,(LONG)(logical[i].right*scale),(LONG)(30*scale)};SendMessageW(menuTooltip,TTM_NEWTOOLRECTW,0,(LPARAM)&tool);}}
     void createMenuTooltip(){
         menuTooltip=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,0,0,0,0,window,nullptr,instance,nullptr);
         if(!menuTooltip)return;SendMessageW(menuTooltip,TTM_SETMAXTIPWIDTH,0,300);SendMessageW(menuTooltip,TTM_SETDELAYTIME,TTDT_INITIAL,350);
-        for(int i=0;i<3;++i){TOOLINFOW tool{sizeof(tool)};tool.uFlags=TTF_SUBCLASS;tool.hwnd=window;tool.uId=i+1;tool.lpszText=LPSTR_TEXTCALLBACKW;SendMessageW(menuTooltip,TTM_ADDTOOLW,0,(LPARAM)&tool);}updateTooltipRegions();
+        for(int i=0;i<4;++i){TOOLINFOW tool{sizeof(tool)};tool.uFlags=TTF_SUBCLASS;tool.hwnd=window;tool.uId=i+1;tool.lpszText=LPSTR_TEXTCALLBACKW;SendMessageW(menuTooltip,TTM_ADDTOOLW,0,(LPARAM)&tool);}updateTooltipRegions();
     }
     float fileListRight(float width) const {
         return width - panel_layout::margin;
@@ -2234,7 +2253,7 @@ class Application {
             case WM_PAINT:
                 app->paint();
                 return 0;
-            case WM_NOTIFY:{auto header=(NMHDR*)lp;if(header&&header->hwndFrom==app->menuTooltip&&header->code==TTN_GETDISPINFOW){auto display=(NMTTDISPINFOW*)lp;int index=(int)header->idFrom-1;if(index>=0&&index<3){app->menuHints[index]=app->functionHint(index);display->lpszText=app->menuHints[index].data();}return 0;}break;}
+            case WM_NOTIFY:{auto header=(NMHDR*)lp;if(header&&header->hwndFrom==app->menuTooltip&&header->code==TTN_GETDISPINFOW){auto display=(NMTTDISPINFOW*)lp;int index=(int)header->idFrom-1;if(index>=0&&index<4){app->menuHints[index]=app->functionHint(index);display->lpszText=app->menuHints[index].data();}return 0;}break;}
             case WM_ERASEBKGND:
                 return 1;
             case WM_CTLCOLORSTATIC:

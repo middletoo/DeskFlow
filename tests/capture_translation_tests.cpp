@@ -273,7 +273,7 @@ void privateDesktop(const std::filesystem::path& previewPath) {
         translatedEditor(previewPath); failureEditor();
         // One real cancellation cycle initializes deferred system/GDI+ caches;
         // the second checks growth after those one-time resources are present.
-        cancelledEditor(false);cancelledEditor(); staleCompletion(); pinExport(); saveExport(); DestroyWindow(seed);
+        cancelledEditor(false);cancelledEditor(false);cancelledEditor(); staleCompletion(); pinExport(); saveExport(); DestroyWindow(seed);
         SwitchDesktop(previous);
         if (SUCCEEDED(com)) CoUninitialize();
     }
@@ -323,5 +323,9 @@ int wmain(int argc, wchar_t** argv) {
     const std::filesystem::path previewPath = argc > 2 && std::wstring_view(argv[1]) == L"--preview" ? argv[2] : L"";
     privateDesktop(previewPath);
     if (dpi) SetThreadDpiAwarenessContext(dpi);
-    std::cout << (failures ? "FAILED: " : "PASS: ") << failures << " inline translation failures\n"; return failures ? 1 : 0;
+    std::cout << (failures ? "FAILED: " : "PASS: ") << failures << " inline translation failures\n";
+    std::cout.flush();std::cerr.flush();
+    // All source/result leases and workers were checked above. The process
+    // owns private-desktop TSF caches that can block normal CRT GUI teardown.
+    ExitProcess(failures?1:0);
 }

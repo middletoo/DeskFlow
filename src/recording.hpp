@@ -8,6 +8,7 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <array>
 
 namespace desk {
 enum class RecordingFormat { Gif, Mp4 };
@@ -44,6 +45,7 @@ struct Status {
     bool started=false,paused=false,finished=false,readyToSave=false;
     std::uint64_t frames=0,activeTicks=0;
     std::filesystem::path temporary;
+    std::array<HWND,4> borders{};
 };
 Status status();
 SIZE outputDimensions(RECT physicalRegion);

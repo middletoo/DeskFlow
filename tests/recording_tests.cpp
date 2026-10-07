@@ -368,17 +368,31 @@ static void deferredWorkflow(HWND source,RECT region,const std::filesystem::path
         DeferredSaveFixture fixture;fixture.output=directory/(format==desk::RecordingFormat::Gif?L"chosen-after-stop.gif":L"chosen-after-stop.mp4");deferredFixture=&fixture;
         auto hook=SetWindowsHookExW(WH_CBT,deferredSaveHook,nullptr,GetCurrentThreadId());auto timer=SetTimer(nullptr,0,30,deferredSaveTimer);
         auto began=GetTickCount64();desk::beginRecording(source,region,format,false);fixture.controller=FindWindowW(L"DeskFlowRecordingController",nullptr);check(fixture.controller!=nullptr,"public recording must open controls before a save dialog");
+        const auto borders=desk::recording_detail::status().borders;
+        for(auto border:borders){
+            DWORD affinity{};check(IsWindowVisible(border),"active recording must show every region edge");
+            check(GetWindowDisplayAffinity(border,&affinity)&&affinity==WDA_EXCLUDEFROMCAPTURE,"region edges must be excluded from GIF/MP4");
+            check(SendMessageW(border,WM_NCHITTEST,0,0)==HTTRANSPARENT,"region edges must pass pointer input through");
+        }
+        // Put one excluded edge inside the synthetic source. Existing decoded
+        // corner/color checks prove that the visible indicator is not encoded.
+        SetWindowPos(borders[0],HWND_TOPMOST,region.left,region.top,region.right-region.left,3,SWP_NOACTIVATE);
         uint64_t peak=privateBytes();waitFrames(fixture.controller,10,2500,peak);
         check(GetTickCount64()-began<2500&&fixture.dialogs==0,"click must begin recording immediately without initial save or countdown");
         auto state=desk::recording_detail::status();auto temporary=state.temporary;check(state.activeTicks>0&&!temporary.empty(),"recording time must advance while streaming to temporary storage");
+        SendMessageW(fixture.controller,WM_COMMAND,101,0);waitPauseAcknowledged(fixture.controller,1000,peak);
+        for(auto border:borders)check(IsWindowVisible(border)&&GetWindowLongPtrW(border,GWLP_USERDATA)==1,"paused recording keeps an amber region outline");
+        SendMessageW(fixture.controller,WM_COMMAND,101,0);
         SendMessageW(fixture.controller,WM_COMMAND,102,0);auto end=GetTickCount64()+10000;
         while(!fixture.dialogs&&GetTickCount64()<end){pumpAll();Sleep(5);}
         check(fixture.dialogs==1&&desk::recording_detail::status().readyToSave,"stop must prompt once and canceled save must retain the recording");
+        for(auto border:borders)check(!IsWindowVisible(border),"region outline disappears before choosing a filename");
         auto pausedFrames=desk::recording_detail::status().frames;Sleep(100);pumpAll();check(desk::recording_detail::status().frames==pausedFrames,"capture must cease before filename selection");
         check(std::filesystem::file_size(temporary)>0&&!std::filesystem::exists(fixture.output),"canceling the save dialog must retain a finalized temporary clip");
         fixture.action=1;fixture.ticks=0;fixture.submitted=false;SendMessageW(fixture.controller,WM_COMMAND,102,0);end=GetTickCount64()+10000;
         while(desk::recordingActive()&&GetTickCount64()<end){pumpAll();Sleep(5);}
         check(!desk::recordingActive()&&fixture.dialogs==2&&std::filesystem::exists(fixture.output),"retry save must commit the chosen filename and close controls");
+        for(auto border:borders)check(!IsWindow(border),"saving releases every region edge window");
         check(!std::filesystem::exists(temporary),"successful save must delete temporary recording");
         KillTimer(nullptr,timer);UnhookWindowsHookEx(hook);deferredFixture=nullptr;
         NativeRecordingResult result;result.format=format;result.path=fixture.output;result.resumedFrames=5;verifyRecordedColors(result);

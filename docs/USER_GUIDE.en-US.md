@@ -99,6 +99,10 @@ Press L and scroll downward manually inside the region, keeping at least half a 
 
 GIF/MP4 starts immediately. The control bar shows elapsed time, pause/resume, the red stop square and cancel. Stop first, then choose a filename/location. Canceling that save dialog retains the clip and offers save retry. Canceling the recording or exiting completely removes temporary media.
 
+The recording region stays outlined in green; pause changes it to amber. Edges pass mouse input through and are excluded from the encoded picture. Stop hides them immediately.
+
+The GitHub icon at the top right opens this repository. Disk-backed data, bounded caches, paced indexing and on-demand OCR/media work reduce background overhead; see [performance measurements](PERFORMANCE.md) for tested conditions.
+
 **MP4 includes system playback audio by default**, such as a browser livestream, video or music on the default output endpoint. It does not open the microphone. Pause stops both audio and video, excluding the paused interval. Disconnecting/changing the output device can require restarting capture.
 
 GIF has no audio; use MP4 for livestream sound. Recording streams to temporary storage rather than retaining all frames in RAM. GIF: 10 FPS; MP4: H.264/AAC at 15 FPS; up to 1920×1080 and 10 minutes.

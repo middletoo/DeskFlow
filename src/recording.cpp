@@ -358,6 +358,8 @@ struct DesktopReference {
 struct RecordingSession {
     HWND owner = nullptr;
     std::atomic<HWND> controller{nullptr};
+    std::array<HWND,4> borders{};
+    std::wstring lastHeadline;
     RECT region{};
     SIZE output{};
     RecordingFormat format{};
@@ -379,6 +381,45 @@ struct RecordingSession {
     HFONT font = nullptr;
     ~RecordingSession(){if(!temporary.empty())DeleteFileW(temporary.c_str());}
 };
+LRESULT CALLBACK borderProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if(message==WM_NCHITTEST) return HTTRANSPARENT;
+    if(message==WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if(message==WM_ERASEBKGND) return 1;
+    if(message==WM_PAINT) {
+        PAINTSTRUCT paint{}; HDC dc=BeginPaint(window,&paint); RECT bounds{};
+        GetClientRect(window,&bounds);
+        auto brush=CreateSolidBrush(GetWindowLongPtrW(window,GWLP_USERDATA)?RGB(239,172,44):RGB(31,204,127));
+        FillRect(dc,&bounds,brush); DeleteObject(brush); EndPaint(window,&paint); return 0;
+    }
+    return DefWindowProcW(window,message,wparam,lparam);
+}
+void destroyBorders(RecordingSession& session) {
+    for(auto& border:session.borders){if(IsWindow(border))DestroyWindow(border);border=nullptr;}
+}
+void createBorders(HWND owner, RecordingSession& session, RECT desktop) {
+    WNDCLASSW cls{}; cls.hInstance=GetModuleHandleW(nullptr);
+    cls.lpszClassName=L"DeskFlowRecordingBorder";cls.lpfnWndProc=borderProcedure;
+    RegisterClassW(&cls);
+    const auto r=session.region;constexpr LONG thickness=3;
+    const LONG left=std::max(desktop.left,r.left-thickness),right=std::min(desktop.right,r.right+thickness);
+    const std::array<RECT,4> strips{{
+        {left,r.top>desktop.top?std::max(desktop.top,r.top-thickness):r.top,right,r.top>desktop.top?r.top:std::min(r.bottom,r.top+thickness)},
+        {left,r.bottom<desktop.bottom?r.bottom:std::max(r.top,r.bottom-thickness),right,std::min(desktop.bottom,r.bottom+thickness)},
+        {r.left>desktop.left?std::max(desktop.left,r.left-thickness):r.left,r.top,r.left>desktop.left?r.left:std::min(r.right,r.left+thickness),r.bottom},
+        {r.right<desktop.right?r.right:std::max(r.left,r.right-thickness),r.top,std::min(desktop.right,r.right+thickness),r.bottom}
+    }};
+    try {
+        for(size_t i=0;i<strips.size();++i){
+            const auto edge=strips[i];
+            auto border=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE,
+                cls.lpszClassName,L"",WS_POPUP,edge.left,edge.top,edge.right-edge.left,edge.bottom-edge.top,owner,nullptr,cls.hInstance,nullptr);
+            requireWin(border!=nullptr,"Cannot create recording region border");session.borders[i]=border;
+            requireWin(SetLayeredWindowAttributes(border,0,255,LWA_ALPHA)!=FALSE,"Cannot display recording region border");
+            requireWin(SetWindowDisplayAffinity(border,WDA_EXCLUDEFROMCAPTURE)!=FALSE,"Cannot exclude recording region border from captured media");
+            SetWindowPos(border,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        }
+    }catch(...){destroyBorders(session);throw;}
+}
 std::mutex sessionMutex;
 std::shared_ptr<RecordingSession> activeSession;
 std::wstring wideError(const std::string& error) {
@@ -559,7 +600,13 @@ void updateController(HWND window, RecordingSession& session, bool requestedTran
             (acknowledged ? L"\u6b63\u5728\u7ee7\u7eed \u00b7 " : L"\u6b63\u5728\u5f55\u5236 \u00b7 ");
         headline = std::wstring(prefix) + std::wstring(time);
     }
-    SetWindowTextW(GetDlgItem(window, 1), headline.c_str());
+    if(headline!=session.lastHeadline){SetWindowTextW(GetDlgItem(window,1),headline.c_str());session.lastHeadline=headline;}
+    for(auto border:session.borders)if(IsWindow(border)){
+        if(session.stop||session.finished)ShowWindow(border,SW_HIDE);
+        else if(GetWindowLongPtrW(border,GWLP_USERDATA)!=(LONG_PTR)session.paused.load()){
+            SetWindowLongPtrW(border,GWLP_USERDATA,session.paused?1:0);InvalidateRect(border,nullptr,FALSE);
+        }
+    }
     EnableWindow(GetDlgItem(window, PauseButton), session.started && !session.stop &&
         session.paused.load() == session.pauseAcknowledged.load(std::memory_order_acquire));
     EnableWindow(GetDlgItem(window, StopButton), (!session.stop || session.readyToSave)&&!session.saving&&!session.dialogOpen);
@@ -680,7 +727,7 @@ LRESULT CALLBACK controllerProcedure(HWND window, UINT message, WPARAM wparam, L
                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         layoutController(window, *session);
         updateController(window, *session);
-        SetTimer(window, 1, 250, nullptr);
+        SetTimer(window, 1, 1000, nullptr);
         SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE);
         return 0;
     }
@@ -736,6 +783,7 @@ LRESULT CALLBACK controllerProcedure(HWND window, UINT message, WPARAM wparam, L
     case WM_NCDESTROY:
         if (!session->finished) requestStop(*session, true);
         session->controller = nullptr;
+        destroyBorders(*session);
         if (session->font) { DeleteObject(session->font); session->font = nullptr; }
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         break;
@@ -813,15 +861,15 @@ void startController(HWND owner, RECT region, RecordingFormat format, const std:
         std::lock_guard lock(sessionMutex); activeSession.reset();
         throw std::runtime_error("Recording control window could not be created");
     }
-    try { session->worker = std::thread([session] { recordingWorker(session); }); }
+    try { createBorders(window,*session,desktop);session->worker = std::thread([session] { recordingWorker(session); }); }
     catch (...) {
         DestroyWindow(window);
         std::lock_guard lock(sessionMutex); activeSession.reset();
         throw;
     }
     SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);
-    // Starting from the capture toolbar already identifies the region. Keep
-    // typing focus in the target application while showing the time/control bar.
+    // Thin nonactivating borders keep the live region visible without a large
+    // transparent overlay or changing typing focus in the target application.
 }
 }
 void beginRecording(HWND owner, RECT region, RecordingFormat format,bool systemSound) {
@@ -839,7 +887,7 @@ bool recordingActive() {
 }
 recording_detail::Status recording_detail::status(){
     std::lock_guard lock(sessionMutex);Status result;
-    if(activeSession){result.started=activeSession->started;result.paused=activeSession->pauseAcknowledged;result.finished=activeSession->finished;result.readyToSave=activeSession->readyToSave;result.frames=activeSession->frames;result.activeTicks=activeSession->activeTicks;result.temporary=activeSession->temporary;}
+    if(activeSession){result.started=activeSession->started;result.paused=activeSession->pauseAcknowledged;result.finished=activeSession->finished;result.readyToSave=activeSession->readyToSave;result.frames=activeSession->frames;result.activeTicks=activeSession->activeTicks;result.temporary=activeSession->temporary;result.borders=activeSession->borders;}
     return result;
 }
 void recording_detail::beginWithDestination(HWND owner, RECT region, RecordingFormat format,

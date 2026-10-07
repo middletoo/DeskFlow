@@ -2,13 +2,30 @@
 
 # DeskFlow
 
-**Find. Keep. Capture. / 搜索 · 留存 · 截取**
+**Quick to open. Light to keep running. / 快捷调起，轻量常驻**
 
 A native Windows desktop utility for independent file search, persistent clipboard history, and screenshots with local OCR, image translation and recording.
 
 Windows 原生桌面工具：独立文件搜索、长期剪贴板历史，以及截图、本地 OCR、原图翻译和录制。
 
+**Low background overhead, fewer steps per task.** Use three global shortcuts, scroll to load more, click for a floating clipboard preview, and translate directly on the screenshot. / **常驻负担小，操作步骤少。** 三个全局快捷键随时调起，列表滚动续载，剪贴板点击浮动预览，截图直接在原位置显示译文。
+
 [中文使用指南](docs/USER_GUIDE.zh-CN.md) · [English user guide](docs/USER_GUIDE.en-US.md) · [Build from source / 开发构建](docs/DEVELOPMENT.md)
+
+## Small background footprint / 低资源占用
+
+Native C++ and Windows APIs, without an embedded browser runtime. Indexes/history stay on disk; caches have limits; OCR and media work start on demand. Background indexing yields CPU, and idle monitoring waits for filesystem notifications.
+
+原生 C++ 与 Windows API，无内嵌浏览器运行时。索引及历史存磁盘，缓存有界，OCR 与录制按需启动。索引主动让出 CPU，待机等待文件系统通知。
+
+| 0.3.2 measured scenario / 实测场景 | CPU | Memory / 内存 |
+| --- | --- | --- |
+| Rendered UI hidden + empty-directory monitor, 60 s / 界面绘制后收回托盘、空目录监控 60 秒 | **0.0033%** combined / 合计 | **11.8 MiB** peak private / 私有内存峰值 |
+| 12,000 synthetic files, indexing worker sampled for 8 s / 12,000 个合成文件、索引进程采样 8 秒 | **0.48%** | **5.6 MiB** private / 私有内存 |
+
+Measured on a Windows test machine with 32 logical processors; CPU is normalized to the whole machine. These are specific fixtures, not limits for every workload. Idle working set was 40.9 MiB including shared system pages. See [measurement details / 性能说明](docs/PERFORMANCE.md).
+
+测试机为 Windows、32 个逻辑处理器，CPU 按整机归一。以上是具体场景的测量值；待机工作集合计 40.9 MiB，含共享系统页。大量真实数据、图片预览、OCR、录制和初次建库需要更多资源，详见 [性能说明](docs/PERFORMANCE.md)。
 
 ## Download / 下载
 
@@ -32,7 +49,7 @@ Check download hashes with `SHA256SUMS.txt`. The validation installer uses a pin
 | Clipboard history / 剪贴板历史 | **Alt+W** |
 | Screenshot / 截图 | **Alt+S** |
 
-Hover over a function to see its current key. Keys can be changed in Settings. / 悬停功能入口显示当前快捷键，可在设置中修改。
+Hover over a function to see its current key. Keys can be changed in Settings. Click the GitHub icon at the top right to open this project. / 悬停功能入口显示当前快捷键，可在设置中修改；右上角 GitHub 图标一键打开当前项目。
 
 ## Find files without a separate search app / 独立文件搜索
 
@@ -93,6 +110,8 @@ Manually scroll a region and stitch reliable overlaps into a long image. / 在�
 GIF or MP4 starts immediately with an elapsed timer and pause/stop/cancel controls. Stop, then choose a filename. Canceling the save dialog retains the clip for retry. MP4 includes default system playback audio; the microphone stays unopened. GIF has no audio.
 
 GIF / MP4 点击后直接录制并计时，可暂停、停止和取消；停止后选择文件名，取消保存仍可重试。MP4 默认录入系统播放声音，麦克风不启用；GIF 无声音。
+
+The live region has a green outline; pause changes it to amber. The thin edges pass mouse input through and are excluded from the recording. Stop hides them before the save dialog. / 实时录制范围显示绿色边框，暂停变琥珀色；窄边框不拦截鼠标、不写入录制文件，停止后在保存对话框出现前隐藏。
 
 ## Built for bounded background work / 面向长期使用的资源管理
 

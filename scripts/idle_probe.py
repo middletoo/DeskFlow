@@ -1,14 +1,16 @@
 """Measure Host + ordinary index helper with no live user clipboard data."""
-import ctypes,json,pathlib,subprocess,time,os
+import ctypes,json,pathlib,subprocess,time,os,uuid
 from ctypes import wintypes
 root=pathlib.Path(__file__).resolve().parents[1]
-out=root/'artifacts'/'validation';data=out/'idle-data';empty=out/'idle-root'
+out=root/'artifacts'/'validation';fixture=out/('idle-'+uuid.uuid4().hex);data=fixture/'data';empty=fixture/'empty'
 data.mkdir(parents=True,exist_ok=True);empty.mkdir(parents=True,exist_ok=True)
 duration=65
 host=subprocess.Popen([str(root/'build'/'Release'/'DeskFlow.exe'),'--idle-test',str(duration),'--data',str(data)],creationflags=subprocess.CREATE_NO_WINDOW)
 worker=subprocess.Popen([str(root/'build'/'Release'/'DeskIndex.exe'),'--data',str(data),'--root',str(empty),'--parent',str(host.pid)],creationflags=subprocess.CREATE_NO_WINDOW)
 user=ctypes.WinDLL('user32');kernel=ctypes.WinDLL('kernel32');psapi=ctypes.WinDLL('psapi')
-user.FindWindowW.argtypes=[wintypes.LPCWSTR,wintypes.LPCWSTR];user.FindWindowW.restype=wintypes.HWND
+callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+user.EnumWindows.argtypes=[callback_type,wintypes.LPARAM]
+user.GetClassNameW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
 user.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
 user.PostMessageW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM]
 kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];kernel.OpenProcess.restype=wintypes.HANDLE
@@ -28,9 +30,16 @@ def sample():
     return values
 try:
     time.sleep(2)
-    hwnd=user.FindWindowW('DeskFlowPanel','DeskFlow');pid=wintypes.DWORD()
-    if hwnd:user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
-    if not hwnd or pid.value!=host.pid:raise RuntimeError('Owned host window not found')
+    found=[]
+    @callback_type
+    def locate(window,_):
+        pid=wintypes.DWORD();user.GetWindowThreadProcessId(window,ctypes.byref(pid))
+        name=ctypes.create_unicode_buffer(128);user.GetClassNameW(window,name,128)
+        if pid.value==host.pid and name.value=='DeskFlowPanel':found.append(window);return False
+        return True
+    user.EnumWindows(locate,0)
+    if not found:raise RuntimeError('Owned host window not found')
+    hwnd=found[0]
     user.PostMessageW(hwnd,0x0010,0,0) # Hide this host; retain its normal initialized UI resources.
     start=time.monotonic();initial=sample();samples=[]
     while time.monotonic()-start<60:

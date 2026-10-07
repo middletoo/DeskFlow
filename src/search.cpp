@@ -1,4 +1,5 @@
 #include "search.hpp"
+#include "index_pacing.hpp"
 #include "sqlite3.h"
 #include <winioctl.h>
 #include <sddl.h>
@@ -503,7 +504,13 @@ struct Watcher {
     std::vector<unsigned char> buffer=std::vector<unsigned char>(64*1024);
     bool pending=false;
     Clock::time_point retry=Clock::now();
-    Watcher(int64_t id,std::wstring directoryPath) : rootId(id),path(std::move(directoryPath)),event(CreateEventW(nullptr,TRUE,FALSE,nullptr)) { open(); }
+    Watcher(int64_t id,std::wstring directoryPath) : rootId(id),path(std::move(directoryPath)),event(CreateEventW(nullptr,TRUE,FALSE,nullptr)) {
+        // SMB limits requests to 64 KiB. Local roots retain a larger queue
+        // during build/install bursts, avoiding repeated whole-root repair.
+        if(!path.starts_with(L"\\") && GetDriveTypeW(fs::path(path).root_path().c_str())!=DRIVE_REMOTE)
+            buffer.resize(256*1024);
+        open();
+    }
     ~Watcher() {close();}
     void close() {
         if (pending && directory) {
@@ -1658,7 +1665,15 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
         Indexer indexer(directory);
         indexer.initialize(roots);
         auto published=Clock::now();
+        const unsigned processors=std::max(1u,(unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+        auto cpuTicks=[] {
+            FILETIME created{},exited{},kernel{},user{};
+            if(!GetThreadTimes(GetCurrentThread(),&created,&exited,&kernel,&user)) return uint64_t{0};
+            return (uint64_t(kernel.dwHighDateTime)<<32)+kernel.dwLowDateTime+
+                   (uint64_t(user.dwHighDateTime)<<32)+user.dwLowDateTime;
+        };
         while(WaitForSingleObject(stop.value,0)!=WAIT_OBJECT_0 && (!parent || WaitForSingleObject(parent.value,0)!=WAIT_OBJECT_0)) {
+            const auto began=Clock::now(); const auto cpuBefore=cpuTicks();
             indexer.notifications();
             bool working=indexer.ntfsBatch();
             working=indexer.refreshBatch() || working;
@@ -1669,6 +1684,12 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
             if(Clock::now()-published>=std::chrono::seconds(1) || (!working && indexer.scanning())) {indexer.publish();published=Clock::now();}
             std::vector<HANDLE> waits{stop.value};
             if(parent) waits.push_back(parent.value);
+            const auto cpuAfter=cpuTicks();
+            const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-began).count()/100;
+            const auto rest=search_detail::backgroundDelayMs(cpuAfter-cpuBefore,(uint64_t)std::max<int64_t>(0,elapsed),processors);
+            // A continuously signaled watcher must not cancel the CPU rest;
+            // stop and parent exit still interrupt it immediately.
+            if(rest && WaitForMultipleObjects(static_cast<DWORD>(waits.size()),waits.data(),FALSE,rest)!=WAIT_TIMEOUT) break;
             for(const auto& watcher:indexer.watchers) if(watcher->pending) waits.push_back(watcher->event.value);
             WaitForMultipleObjects(static_cast<DWORD>(waits.size()),waits.data(),FALSE,working?0:1000);
         }
