@@ -588,7 +588,7 @@ public:
     void removeOwnIndexRows() {
         int64_t after=0;
         for(;;) {
-            Statement rows(database.value,"SELECT f.id,f.path FROM files f JOIN files_fts ON files_fts.rowid=f.id WHERE files_fts MATCH 'name_fold:\"files.db\"' AND files_fts.rowid>?1 AND f.name_fold IN('files.db','files.db-wal','files.db-shm','files.db-journal') ORDER BY files_fts.rowid LIMIT 256");rows.number(1,after);
+            Statement rows(database.value,"SELECT id,path FROM files WHERE name_fold IN('files.db','files.db-wal','files.db-shm','files.db-journal') AND id>?1 ORDER BY id LIMIT 256");rows.number(1,after);
             std::vector<std::pair<int64_t,std::wstring>> batch;
             while(rows.row()) batch.emplace_back(sqlite3_column_int64(rows.value,0),wide(sqlite3_column_text(rows.value,1)));
             if(batch.empty()) return;
@@ -1070,6 +1070,37 @@ HANDLE createControllerEvent(const std::wstring& name) {
     HANDLE event=CreateEventW(&attributes,TRUE,FALSE,name.c_str());
     LocalFree(security);return event;
 }
+struct WriterPacing {
+    sqlite3* database;
+    HANDLE stop,parent;
+    unsigned processors;
+    Clock::time_point sampled=Clock::now();
+    uint64_t cpu=threadCpu();
+    static uint64_t threadCpu(){
+        FILETIME created{},exited{},kernel{},user{};
+        if(!GetThreadTimes(GetCurrentThread(),&created,&exited,&kernel,&user))return 0;
+        return (uint64_t(kernel.dwHighDateTime)<<32)+kernel.dwLowDateTime+
+               (uint64_t(user.dwHighDateTime)<<32)+user.dwLowDateTime;
+    }
+    WriterPacing(sqlite3* db,HANDLE stopEvent,HANDLE parentProcess,unsigned count)
+        :database(db),stop(stopEvent),parent(parentProcess),processors(count){
+        sqlite3_progress_handler(database,2048,[](void* state)noexcept->int{
+            return static_cast<WriterPacing*>(state)->progress();
+        },this);
+    }
+    ~WriterPacing(){sqlite3_progress_handler(database,0,nullptr,nullptr);}
+    int progress()noexcept{
+        const auto now=Clock::now();
+        if(now-sampled<std::chrono::milliseconds(20))return 0;
+        HANDLE controls[]{stop,parent};const DWORD count=parent?2:1;
+        if(WaitForMultipleObjects(count,controls,FALSE,0)!=WAIT_TIMEOUT)return 1;
+        const auto current=threadCpu();
+        const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(now-sampled).count()/100;
+        const auto delay=search_detail::backgroundDelayMs(current-cpu,(uint64_t)elapsed,processors);
+        if(delay && WaitForMultipleObjects(count,controls,FALSE,delay)!=WAIT_TIMEOUT)return 1;
+        sampled=Clock::now();cpu=threadCpu();return 0;
+    }
+};
 }
 
 namespace search_detail {
@@ -1663,9 +1694,10 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
     int outcome=0;
     try {
         Indexer indexer(directory);
+        const unsigned processors=std::max(1u,(unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+        WriterPacing sqlPacing(indexer.database.value,stop.value,parent.value,processors);
         indexer.initialize(roots);
         auto published=Clock::now();
-        const unsigned processors=std::max(1u,(unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
         auto cpuTicks=[] {
             FILETIME created{},exited{},kernel{},user{};
             if(!GetThreadTimes(GetCurrentThread(),&created,&exited,&kernel,&user)) return uint64_t{0};
@@ -1697,8 +1729,10 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
         meta(indexer.database.value,"message",L"索引进程已停止，已有索引仍可查询");
         execute(indexer.database.value,"PRAGMA wal_checkpoint(PASSIVE)");
     } catch(const std::exception& error) {
-        try {Database db(directory,256);meta(db.value,"building",L"0");meta(db.value,"message",L"索引暂停："+wide(reinterpret_cast<const unsigned char*>(error.what())));} catch(...) {}
-        outcome=1;
+        const bool stopped=WaitForSingleObject(stop.value,0)==WAIT_OBJECT_0 ||
+                           (parent && WaitForSingleObject(parent.value,0)==WAIT_OBJECT_0);
+        try {Database db(directory,256);meta(db.value,"building",L"0");meta(db.value,"message",stopped?L"索引进程已停止，已有索引仍可查询":L"索引暂停："+wide(reinterpret_cast<const unsigned char*>(error.what())));} catch(...) {}
+        outcome=stopped?0:1;
     }
     SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_END);
     SetConsoleCtrlHandler(consoleControl,FALSE);controlStop=nullptr;

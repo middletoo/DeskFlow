@@ -25,10 +25,10 @@ Portable search/history/capture work directly. Windows OCR needs a registered MS
 For your own development package, generate a development certificate, inspect it, then explicitly trust only that known leaf in Trusted People on your development machine and register the package. / 自行开发时，生成并检查证书后，在自己的开发设备确认信任该已知叶证书到 Trusted People，再注册包。
 
 ```powershell
-pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.2.0
+pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.2.1
 # Only after inspecting your certificate; elevated PowerShell / 检查证书后使用管理员 PowerShell：
 Import-Certificate -FilePath artifacts/msix/DeskFlow-Development.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.2.0-x64.msix
+Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.2.1-x64.msix
 ```
 
 Do not commit PFX/private keys, personal settings or generated trust material. / 不要提交 PFX/私钥、个人设置或生成的信任材料。

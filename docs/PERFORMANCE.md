@@ -33,6 +33,10 @@ The indexing loop now uses actual thread CPU time to insert interruptible rests.
 
 索引循环现在依据实际线程 CPU 时间插入可中断等待，日常后台目标为整机 0.5%，最多按四分之一单核预算工作。单次较大的系统或 SQLite 操作可能暂时超过目标。减少 CPU 会延长初次建库时间，已有索引结果继续可查。
 
+Long writer-side SQLite statements also yield through a progress callback, so large repair/delete operations do not wait until a whole statement finishes before pacing. Read-only foreground connections use their own query budgets. Startup cleanup selects runtime filenames through the name index rather than searching the full-text index.
+
+索引写入端的 SQLite 长语句也通过进度回调分时等待，批量校准/删除无需等整条语句结束才让出 CPU；前台只读连接使用独立查询预算。启动清理改用名称索引查找运行文件，避免多余的全文索引查询。
+
 Local directory notification buffers are 256 KiB; network roots keep the required 64 KiB limit. The larger local queue reduces overflow repairs during file creation bursts. The recorder uses four slim indicator windows rather than a full-screen transparent surface, and redraws their color only when state changes.
 
 本地目录通知缓冲区改为 256 KiB，网络目录保留 64 KiB 限制，减少大量文件变更导致的溢出校准。录制指示采用四条窄窗口边框，状态变化时才更新颜色，避免创建整屏透明图层。
