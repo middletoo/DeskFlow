@@ -40,7 +40,12 @@ jobs:
         run: |
           $data = Join-Path $env:RUNNER_TEMP 'DeskFlow-startup'
           $exe = (Resolve-Path 'build-ci/Release/DeskFlow.exe').Path
-          $app = Start-Process -FilePath $exe -ArgumentList ('--self-test --data "' + $data + '"') -WindowStyle Hidden -PassThru
+          $start = [Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = $exe
+          $start.Arguments = '--self-test --tray --data "' + $data + '"'
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $app = [Diagnostics.Process]::Start($start)
           if (!$app.WaitForExit(15000)) { Stop-Process -Id $app.Id; throw 'Startup timed out' }
           if ($app.ExitCode -ne 0) { throw 'Startup failed' }
           $result = Get-Content (Join-Path $data 'smoke.json') -Raw | ConvertFrom-Json

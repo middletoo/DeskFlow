@@ -2,9 +2,9 @@
 
 # Build and verify / 构建与验证
 
-Windows x64/ARM64 host, Visual Studio 2022 C++ desktop tools (including the target architecture), a current Windows SDK with C++/WinRT, CMake 3.24+ and PowerShell. SQLite and JSON sources are vendored. The application needs no Python, Node.js or .NET runtime.
+Windows x64/ARM64 host, Visual Studio 2022/2026 C++ desktop tools (including the target architecture), a current Windows SDK with C++/WinRT, CMake 3.24+ (4.2+ for Visual Studio 2026) and PowerShell. SQLite and JSON sources are vendored. The application needs no Python, Node.js or .NET runtime.
 
-需要 Windows x64/ARM64 主机、Visual Studio 2022 C++ 桌面工具及目标架构工具链、带 C++/WinRT 的 Windows SDK、CMake 3.24+ 和 PowerShell。工程自带 SQLite 与 JSON 源码，运行版不依赖 Python、Node.js 或 .NET。
+需要 Windows x64/ARM64 主机、Visual Studio 2022/2026 C++ 桌面工具及目标架构工具链、带 C++/WinRT 的 Windows SDK、CMake 3.24+（VS 2026 需要 4.2+）和 PowerShell。工程自带 SQLite 与 JSON 源码，运行版不依赖 Python、Node.js 或 .NET。
 
 ```powershell
 git clone https://github.com/middletoo/DeskFlow.git
