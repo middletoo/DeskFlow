@@ -1070,6 +1070,7 @@ void beginCapture(HWND owner, CaptureCallback callback, RegionCallback recording
     if (!window) { recover(); return; }
     state->scale = std::clamp(GetDpiForWindow(window) / 96.0f, 1.0f, 2.5f); activeWindow = window;
     state->cursor = state->mouse(); state->cursorKnown = true; state->updateHover();
-    ShowWindow(window, SW_SHOW); SetForegroundWindow(window); SetFocus(window); UpdateWindow(window);
+    SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);
+    SetForegroundWindow(window); SetFocus(window); UpdateWindow(window);
 }
 }
