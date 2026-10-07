@@ -11,6 +11,6 @@ inline unsigned backgroundDelayMs(std::uint64_t cpuTicks, std::uint64_t elapsedT
     const double fraction = std::min(0.25, 0.005 * std::max(1u, logicalProcessors));
     const double missing = cpuTicks / fraction - elapsedTicks;
     if (missing <= 0) return 0;
-    return static_cast<unsigned>(std::min(1000.0, std::ceil(missing / 10000.0)));
+    return static_cast<unsigned>(std::min(3000.0, std::ceil(missing / 10000.0)));
 }
 }

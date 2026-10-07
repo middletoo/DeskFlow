@@ -449,9 +449,11 @@ int wmain(int argc, wchar_t** argv) {
             // buffer really overflows. Recovery must use directory reconciliation.
             HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME,FALSE,worker.process.dwThreadId);
             require(thread!=nullptr && SuspendThread(thread)!=static_cast<DWORD>(-1),"cannot pause test worker for notification overflow");
-            for(int i=0;i<2500;++i) put(root / L"burst" / (L"overflow-checkpoint-"+std::to_wstring(i)+L".txt"));
+            // Long names guarantee overflow of the enlarged 256 KiB local
+            // queue on systems that coalesce create/write notifications.
+            for(int i=0;i<2500;++i) put(root / L"burst" / (L"overflow-checkpoint-"+std::to_wstring(i)+std::wstring(96,L'x')+L".txt"));
             ResumeThread(thread);CloseHandle(thread);
-            require(eventually([&] {return store.query(L"overflow-checkpoint-2499").size()==1 && !store.status().building && store.status().message.find(L"通知溢出校准")!=std::wstring::npos;},30),"notification overflow did not reconcile the affected root");
+            require(eventually([&] {return store.query(L"overflow-checkpoint-2499").size()==1 && !store.status().building && store.status().message.find(L"通知溢出校准")!=std::wstring::npos;},120),"notification overflow did not reconcile the affected root");
             fs::remove_all(root / L"burst");
             require(eventually([&] {return store.query(L"overflow-checkpoint").empty();},30),"bulk directory deletion left descendants indexed");
 

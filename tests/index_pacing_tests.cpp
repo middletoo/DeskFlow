@@ -31,6 +31,7 @@ int wmain(int argc,wchar_t** argv){
         const double elapsed=(GetTickCount64()-began)/1000.0;
         const auto processors=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
         const double percent=(cpu(child.hProcess)-before)/10000000.0/elapsed/processors*100;
+        std::cout<<"background cpu_percent="<<percent<<" processors="<<processors<<" seconds="<<elapsed<<'\n';
         require(percent<(processors>=4?1.0:2.0),"sustained synthetic indexing exceeded background CPU budget");
         const auto queryStart=GetTickCount64();require(!store.query(L"entry").empty(),"paced index results disappeared");
         require(GetTickCount64()-queryStart<500,"foreground indexed query slowed down during background work");
