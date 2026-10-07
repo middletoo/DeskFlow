@@ -36,7 +36,13 @@ int main() {
         std::string ansi(n, 0);
         WideCharToMultiByte(CP_ACP, 0, message, -1, ansi.data(), n, nullptr, nullptr);
         ansi.resize(n-1);
-        if (desk::userError(std::runtime_error(ansi)) != message)
+        int expectedLength=MultiByteToWideChar(CP_ACP,0,ansi.data(),(int)ansi.size(),nullptr,0);
+        std::wstring expected(expectedLength,L'\0');
+        MultiByteToWideChar(CP_ACP,0,ansi.data(),(int)ansi.size(),expected.data(),expectedLength);
+        // An English Windows code page cannot represent Chinese; verify its
+        // actual encoding separately from the lossless UTF-8 application path.
+        if (desk::userError(std::runtime_error(ansi)) != expected ||
+            desk::userError(std::runtime_error(desk::utf8(message))) != message)
             throw std::runtime_error("localized Windows errors must not throw or lose their text");
         std::filesystem::remove(path);
         std::cout << "PASS settings, encrypted API keys and hotkeys\n";
