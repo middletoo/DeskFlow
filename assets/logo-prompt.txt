@@ -1,0 +1,10 @@
+Built-in image_gen, 2026-10-07. Original source: deskflow-logo.png.
+Use case: logo-brand. Production Windows icon for DeskFlow, combining independent file search, clipboard history and screen capture/OCR.
+Single folded-card/ribbon symbol with three broad interlocking rounded planes, flowing movement and negative space suggesting D. Ink blue and cyan, vector-friendly crisp curves, transparent background, no text or borrowed product logos. Recognizable at tray size.
+Conversion script only resizes/encodes the unchanged image to Windows PNG/ICO sizes.
+
+Full prompt sent to the built-in tool (transparent_background=true):
+Use case: logo-brand.
+Asset type: original production app icon for DeskFlow, a modern lightweight Windows desktop utility combining local file search, clipboard history and screen capture/OCR.
+Primary request: design ONE polished, original, extremely legible app icon, no wordmark or letters. A compact continuous folded-card/ribbon symbol with three broad interlocking rounded planes, a subtle forward-moving flow gesture and elegant negative space suggesting a D. A coherent single silhouette, not three unrelated tiny pictograms. Ink blue and clear cyan derived from a calm Windows productivity interface; ivory negative space. Minimal flat geometric vector-like treatment with crisp curves, pixel-friendly visual weight and restrained dimensional layering, at most a subtle gradient; recognizable at 16px.
+Composition: icon alone centered with generous even transparent margins, fills about 78 percent of a square canvas. No mockup, no presentation sheet, no surrounding objects. True transparent background outside the icon. No text, no border, no watermark, no photorealism, no busy strokes, no tiny magnifying-glass/clipboard/scissors symbols. Do not imitate any existing Everything, PixPin or WeChat logo.

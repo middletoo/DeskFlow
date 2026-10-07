@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap10 desktop rescap">
+  <Identity Name="DeskFlow.Desktop" Publisher="CN=DeskFlow Development" Version="0.3.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>DeskFlow 桌面提效</DisplayName>
+    <PublisherDisplayName>DeskFlow Development</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources><Resource Language="zh-CN" /><Resource Language="en-US" /></Resources>
+  <Applications>
+    <Application Id="DeskFlow" Executable="DeskFlow.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="DeskFlow 桌面提效" Description="Local file search, clipboard history, capture and OCR"
+                          BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="DeskFlow.exe" EntryPoint="Windows.FullTrustApplication" uap10:Parameters="--tray">
+          <desktop:StartupTask TaskId="DeskFlowStartup" Enabled="false" DisplayName="DeskFlow 桌面提效" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="allowElevation" />
+  </Capabilities>
+</Package>
