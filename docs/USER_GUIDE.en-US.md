@@ -8,7 +8,9 @@ DeskFlow combines independent file search, persistent clipboard history, and cap
 
 ## Start using DeskFlow
 
-Windows 10 version 2004 or later and Windows 11, x64. Start the installed application from the Start menu. Closing its main window returns it to the tray; use the tray menu to exit completely. See the [development guide](DEVELOPMENT.md) to build from source. Local Windows OCR requires MSIX package identity and installed OCR language resources.
+Windows 10 version 2004 or later and Windows 11, with x64, x86 and ARM64 builds. ARM64 validation uses Windows 11 on Arm. Most Intel/AMD PCs use x64; 32-bit Windows uses x86; Windows on Arm uses ARM64.
+
+Download the matching architecture from [Releases](https://github.com/middletoo/DeskFlow/releases). Extract the portable archive and run `DeskFlow.exe`. For local OCR/image translation, extract the setup archive and run `Install-DeskFlow.cmd`. The first installation may ask for UAC to trust the pinned development certificate; no private key is distributed. Launch the installed app from Start. Closing the main window returns it to the tray; use the tray menu to exit completely. See [Development](DEVELOPMENT.md) for source builds. OCR also needs Windows language resources.
 
 | Function | Default hotkey |
 | --- | --- |

@@ -41,8 +41,14 @@ if($signature.Status -eq 'UnknownError'){
 }
 if($signature.Status -notin @('Valid','NotTrusted') -and !$untrustedOwnChain){throw "The package signature is invalid: $($signature.Status)."}
 $trustHelper=Join-Path $bundle 'DeskTrust.exe'
-$allowedHelperSha256='8FF5D8E44955C8B88FDA9DDA51438C981E01C98E4B199802B86F5D89CE911A3F'
-if((Get-FileHash -LiteralPath $trustHelper -Algorithm SHA256).Hash -ne $allowedHelperSha256){throw 'Certificate helper failed its SHA256 check.'}
+# Exact signed maintainer helpers: original x64 and the 0.3.1 x64/x86/ARM64 builds.
+$allowedHelperSha256=@(
+    '8FF5D8E44955C8B88FDA9DDA51438C981E01C98E4B199802B86F5D89CE911A3F',
+    '1D7FE2010FF9D62EAF0743966B621CC5D7E8B51BD8A2FA9B448CF007438ED412',
+    '1C0E2DC0F8E296CCD5E71C1E4D745417BA33DA6132F4167ECE694E3054D0F8BF',
+    '5A3C2A69173200973E197BEEDECA6F3D04DFCAAC6BB172F8546F5B6DA10FF332'
+)
+if((Get-FileHash -LiteralPath $trustHelper -Algorithm SHA256).Hash -notin $allowedHelperSha256){throw 'Certificate helper failed its SHA256 check.'}
 if($ValidateOnly){
     @{validated=$true;publisher=$certificate.Subject;thumbprint=$certificate.Thumbprint;package=$packagePath;signatureStatus=[string]$signature.Status;changesMade=$false} | ConvertTo-Json -Compress
     exit 0
@@ -53,7 +59,7 @@ $receiptRoot=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'D
 New-Item -ItemType Directory -Force -Path $receiptRoot | Out-Null
 $payloadLock=[IO.File]::Open($packagePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 $helperLock=[IO.File]::Open($trustHelper,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-if((Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash -ne $manifest.packageSha256 -or (Get-FileHash -LiteralPath $trustHelper -Algorithm SHA256).Hash -ne $allowedHelperSha256){throw 'Payload changed before administrator confirmation.'}
+if((Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash -ne $manifest.packageSha256 -or (Get-FileHash -LiteralPath $trustHelper -Algorithm SHA256).Hash -notin $allowedHelperSha256){throw 'Payload changed before administrator confirmation.'}
 $alreadyTrusted=Test-Path -LiteralPath ("Cert:\LocalMachine\TrustedPeople\"+$allowedThumbprint)
 if(!$alreadyTrusted){
     $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())

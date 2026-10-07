@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Build a DeskFlow x64 development MSIX without installing it or changing trust.
+Build a DeskFlow development MSIX without installing it or changing trust.
 .EXAMPLE
 pwsh -File scripts/package.ps1 -Unsigned
 .EXAMPLE
@@ -18,7 +18,8 @@ param(
     [string]$BinaryDirectory = '',
     [string]$OutputDirectory = '',
     [string]$Publisher = 'CN=DeskFlow Development',
-    [string]$Version = '0.3.0.0',
+    [string]$Version = '0.3.1.0',
+    [ValidateSet('x64','x86','ARM64')][string]$Architecture = 'x64',
     [string]$PfxPath = '',
     [string]$CertificateThumbprint = '',
     [Security.SecureString]$PfxPassword,
@@ -28,7 +29,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $deskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (!$BinaryDirectory) { $BinaryDirectory = Join-Path $deskRoot "build/$Configuration" }
+if (!$BinaryDirectory) { $deskBuildName=if($Architecture -eq 'x64'){'build'}else{"build-$Architecture"}; $BinaryDirectory = Join-Path $deskRoot "$deskBuildName/$Configuration" }
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $deskRoot 'artifacts/msix' }
 $BinaryDirectory = [IO.Path]::GetFullPath($BinaryDirectory)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -36,7 +37,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must contain fou
 if ($Unsigned -and ($PfxPath -or $CreateDevelopmentCertificate)) { throw 'Choose unsigned packaging or one signing method.' }
 if ($PfxPath -and $CreateDevelopmentCertificate) { throw 'Choose one signing method.' }
 if (!$SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -Configuration $Configuration
+    & (Join-Path $PSScriptRoot 'build.ps1') -Configuration $Configuration -Architecture $Architecture
     if ($LASTEXITCODE -ne 0) { throw "Build failed with exit $LASTEXITCODE." }
 }
 foreach ($deskExecutable in @('DeskFlow.exe','DeskOCR.exe','DeskIndex.exe')) {
@@ -60,6 +61,7 @@ Get-ChildItem -LiteralPath $BinaryDirectory -Filter '*.dll' -File | Copy-Item -D
 [xml]$deskManifest = Get-Content -LiteralPath (Join-Path $deskRoot 'packaging/AppxManifest.xml') -Raw -Encoding utf8
 $deskManifest.Package.Identity.Publisher = $Publisher
 $deskManifest.Package.Identity.Version = $Version
+$deskManifest.Package.Identity.ProcessorArchitecture = $Architecture.ToLowerInvariant()
 $deskManifest.Save((Join-Path $deskLayout 'AppxManifest.xml'))
 Add-Type -AssemblyName System.Drawing
 foreach ($deskAsset in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Square150x150Logo.png',150))) {
@@ -68,7 +70,7 @@ foreach ($deskAsset in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Sq
     if (!(Test-Path -LiteralPath $deskSource -PathType Leaf)) { throw "Logo asset missing: $deskSource. Run scripts/build-logo-assets.ps1 first." }
     Copy-Item -LiteralPath $deskSource -Destination (Join-Path $deskLayout "Assets/$($deskAsset[0])")
 }
-$deskPackage = Join-Path $OutputDirectory "DeskFlow-$Version-x64.msix"
+$deskPackage = Join-Path $OutputDirectory "DeskFlow-$Version-$($Architecture.ToLowerInvariant()).msix"
 & $deskMakeAppx pack /d $deskLayout /p $deskPackage /o
 if ($LASTEXITCODE -ne 0) { throw "MSIX validation/packaging failed with exit $LASTEXITCODE." }
 $deskCertificatePath = Join-Path $OutputDirectory 'DeskFlow-Development.cer'

@@ -8,7 +8,9 @@ DeskFlow 是 Windows 原生桌面工具，将独立文件搜索、永久剪贴�
 
 ## 开始使用
 
-适用于 Windows 10 2004 或更高版本、Windows 11，当前构建为 x64。安装发行版后从开始菜单启动，关闭主窗口会收回托盘，托盘菜单可完全退出。源代码构建方法见 [开发指南](DEVELOPMENT.md)。Windows 本地 OCR 需要 MSIX 包身份及系统 OCR 语言资源。
+适用于 Windows 10 2004 或更高版本、Windows 11，提供 x64、x86 和 ARM64 构建，ARM64 在 Windows 11 on Arm 上验证。多数 Intel/AMD 电脑选 x64，32 位 Windows 选 x86，Windows on Arm 选 ARM64。
+
+从 [Releases](https://github.com/middletoo/DeskFlow/releases) 下载对应架构。便携版完整解压后运行 `DeskFlow.exe`；需要本地 OCR / 原图翻译时下载安装版，解压后运行 `Install-DeskFlow.cmd`。首次安装可能请求 UAC 来信任固定开发者证书，私钥不在下载包中。安装后从开始菜单启动，关闭主窗口收回托盘，托盘菜单可完全退出。源代码构建见 [开发指南](DEVELOPMENT.md)，OCR 还需要系统语言资源。
 
 | 功能 | 默认快捷键 |
 | --- | --- |

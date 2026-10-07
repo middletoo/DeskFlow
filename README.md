@@ -10,9 +10,19 @@ Windows 原生桌面工具：独立文件搜索、长期剪贴板历史，以及
 
 [中文使用指南](docs/USER_GUIDE.zh-CN.md) · [English user guide](docs/USER_GUIDE.en-US.md) · [Build from source / 开发构建](docs/DEVELOPMENT.md)
 
-> Validation release for Windows 10 2004+ / Windows 11, x64. Local OCR requires MSIX package identity and Windows language resources. Screenshots below use synthetic data only.
+## Download / 下载
+
+Prebuilt **Windows x64, x86 and ARM64** programs are available in [Releases](https://github.com/middletoo/DeskFlow/releases). / 已编译的 **Windows x64、x86、ARM64** 程序见 [Releases](https://github.com/middletoo/DeskFlow/releases)。
+
+- **portable.zip**: extract everything and run `DeskFlow.exe`; keep both worker EXEs beside it. / 完整解压后运行 `DeskFlow.exe`，保留旁边的两个工作程序。
+- **setup.zip**: extract and run `Install-DeskFlow.cmd`; includes MSIX identity for local OCR and image translation. / 完整解压后运行 `Install-DeskFlow.cmd`，包含本地 OCR、原图翻译需要的 MSIX 包身份。
+- x64 is for most Intel/AMD PCs; x86 for 32-bit Windows; ARM64 for Windows on Arm. No separate VC++ runtime is required. / 大多数 Intel/AMD 电脑选 x64；32 位 Windows 选 x86；Windows on Arm 选 ARM64，无需单独安装 VC++ 运行库。
+
+Check download hashes with `SHA256SUMS.txt`. The validation installer uses a pinned self-signed development certificate and may ask for UAC on first installation. / 可用 `SHA256SUMS.txt` 校验下载；当前验证版使用固定的开发者自签名证书，首次安装可能请求 UAC。
+
+> Validation release for Windows 10 2004+ / Windows 11; ARM64 validation uses Windows 11 on Arm. Local OCR requires MSIX package identity and Windows language resources. Screenshots below use synthetic data only.
 >
-> 当前为 Windows 10 2004+ / Windows 11 x64 验证版。本地 OCR 需要 MSIX 包身份及系统语言资源。以下截图全部为合成示例。
+> 当前为 Windows 10 2004+ / Windows 11 验证版；ARM64 在 Windows 11 on Arm 上验证。本地 OCR 需要 MSIX 包身份及系统语言资源。以下截图全部为合成示例。
 
 ## One tray app, three shortcuts / 一个托盘工具，三个入口
 

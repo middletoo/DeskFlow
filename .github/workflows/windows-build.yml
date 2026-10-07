@@ -1,0 +1,58 @@
+name: Windows architecture validation
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.architecture }} build and native tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+          - architecture: x86
+            runner: windows-2022
+          - architecture: ARM64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production programs and isolated tests
+        run: |
+          ./scripts/build.ps1 -Architecture '${{ matrix.architecture }}' -BuildDirectory build-ci -SkipTests -Targets DeskFlow,DeskIndex,DeskOCR,DeskTrust,history_tests,settings_tests,search_tests,index_fairness_tests,translation_tests,host_tests
+      - name: Run tests on the matching Windows architecture
+        run: |
+          ctest --test-dir build-ci -C Release --output-on-failure -R '^(history|settings|search|index_root_fairness|translation|ocr_identity_error|host_private_desktop)$'
+          if ($LASTEXITCODE -ne 0) { throw 'Architecture tests failed' }
+      - name: Verify native application startup with synthetic data
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'DeskFlow-startup'
+          $exe = (Resolve-Path 'build-ci/Release/DeskFlow.exe').Path
+          $app = Start-Process -FilePath $exe -ArgumentList ('--self-test --data "' + $data + '"') -WindowStyle Hidden -PassThru
+          if (!$app.WaitForExit(15000)) { Stop-Process -Id $app.Id; throw 'Startup timed out' }
+          if ($app.ExitCode -ne 0) { throw 'Startup failed' }
+          $result = Get-Content (Join-Path $data 'smoke.json') -Raw | ConvertFrom-Json
+          if (!$result.windowCreated) { throw 'Native window was not created' }
+          $result | ConvertTo-Json
+      - name: Retain unsigned CI binaries for build inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskFlow-ci-${{ matrix.architecture }}
+          path: |
+            build-ci/Release/DeskFlow.exe
+            build-ci/Release/DeskIndex.exe
+            build-ci/Release/DeskOCR.exe
+          retention-days: 7
+          if-no-files-found: error
