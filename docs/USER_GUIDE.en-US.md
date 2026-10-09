@@ -2,7 +2,7 @@
 
 # DeskFlow user guide
 
-[简体中文](USER_GUIDE.zh-CN.md) · [Project overview](../README.md)
+[简体中文](USER_GUIDE.zh-CN.md) · [Project overview](../README.en.md)
 
 DeskFlow combines independent file search, persistent clipboard history, and capture/OCR/image translation in a native Windows tray application. All documentation screenshots use synthetic data.
 
@@ -10,7 +10,7 @@ DeskFlow combines independent file search, persistent clipboard history, and cap
 
 Windows 10 version 2004 or later and Windows 11, with x64, x86 and ARM64 builds. ARM64 validation uses Windows 11 on Arm. Most Intel/AMD PCs use x64; 32-bit Windows uses x86; Windows on Arm uses ARM64.
 
-Download the matching architecture from [Releases](https://github.com/middletoo/DeskFlow/releases). Extract the portable archive and run `DeskFlow.exe`. For local OCR/image translation, extract the setup archive and run `Install-DeskFlow.cmd`. The first installation may ask for UAC to trust the pinned development certificate; no private key is distributed. Launch the installed app from Start. Closing the main window returns it to the tray; use the tray menu to exit completely. See [Development](DEVELOPMENT.md) for source builds. OCR also needs Windows language resources.
+Download the matching architecture from [Releases](https://github.com/middletoo/DeskFlow/releases). Extract the portable archive and run `DeskFlow.exe`. For local OCR/image translation, extract the setup archive and run `Install-DeskFlow.cmd`. The first installation may ask for UAC to trust the pinned development certificate; no private key is distributed. Launch the installed app from Start. Closing the main window returns it to the tray; use the tray menu to exit completely. See [Development](DEVELOPMENT.en-US.md) for source builds. OCR also needs Windows language resources.
 
 | Function | Default hotkey |
 | --- | --- |
@@ -105,7 +105,7 @@ GIF/MP4 starts immediately. The control bar shows elapsed time, pause/resume, th
 
 The recording region stays outlined in green; pause changes it to amber. Edges pass mouse input through and are excluded from the encoded picture. Stop hides them immediately.
 
-The GitHub icon at the top right opens this repository. Disk-backed data, bounded caches, paced indexing and on-demand OCR/media work reduce background overhead; see [performance measurements](PERFORMANCE.md) for tested conditions.
+The GitHub icon at the top right opens this repository. Disk-backed data, bounded caches, paced indexing and on-demand OCR/media work reduce background overhead; see [performance measurements](PERFORMANCE.en-US.md) for tested conditions.
 
 **MP4 includes system playback audio by default**, such as a browser livestream, video or music on the default output endpoint. It does not open the microphone. Pause stops both audio and video, excluding the paused interval. Disconnecting/changing the output device can require restarting capture.
 

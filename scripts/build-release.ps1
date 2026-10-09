@@ -42,11 +42,12 @@ foreach($architecture in @('x64','x86','ARM64')){
     $portable=Join-Path $scratch "$architecture-portable"
     New-Item -ItemType Directory -Force -Path $portable | Out-Null
     foreach($name in @('DeskFlow.exe','DeskIndex.exe','DeskOCR.exe')){Copy-Item -LiteralPath (Join-Path $binaries $name) -Destination $portable}
-    foreach($name in @('README.md','THIRD-PARTY-NOTICES.md')){Copy-Item -LiteralPath (Join-Path $root $name) -Destination $portable}
+    foreach($name in @('README.md','README.en.md','THIRD-PARTY-NOTICES.md')){Copy-Item -LiteralPath (Join-Path $root $name) -Destination $portable}
     Copy-Item -LiteralPath (Join-Path $root 'assets') -Destination $portable -Recurse
     $docs=Join-Path $portable 'docs'
     New-Item -ItemType Directory -Force -Path (Join-Path $docs 'images') | Out-Null
-    foreach($name in @('USER_GUIDE.zh-CN.md','USER_GUIDE.en-US.md','DEVELOPMENT.md','PERFORMANCE.md')){Copy-Item -LiteralPath (Join-Path $root "docs/$name") -Destination $docs}
+    foreach($name in @('USER_GUIDE.zh-CN.md','USER_GUIDE.en-US.md','DEVELOPMENT.md','DEVELOPMENT.en-US.md','PERFORMANCE.md','PERFORMANCE.en-US.md')){Copy-Item -LiteralPath (Join-Path $root "docs/$name") -Destination $docs}
+    Copy-Item -LiteralPath (Join-Path $root 'docs/benchmarks') -Destination $docs -Recurse
     foreach($name in @('files','clipboard','clipboard-preview','capture','capture-hover','ocr','translation','pin','scrolling','recording')){Copy-Item -LiteralPath (Join-Path $root "docs/images/$name.png") -Destination (Join-Path $docs 'images')}
     @"
 DeskFlow $releaseVersion — Windows $architecture

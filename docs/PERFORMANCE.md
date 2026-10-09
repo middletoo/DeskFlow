@@ -1,57 +1,86 @@
-<p align="center"><img src="../assets/DeskFlow-150.png" width="80" alt="DeskFlow logo"></p>
+<p align="center"><img src="../assets/DeskFlow-150.png" width="80" alt="DeskFlow 标志"></p>
 
-# Resource use and quick interaction / 资源占用与快捷交互
+# 资源占用与快捷交互
 
-[Project overview / 项目首页](../README.md)
+[English](PERFORMANCE.en-US.md) · [项目首页](../README.md)
 
-## Measurements / 实测
+## 与 Everything 的同目录对照
 
-DeskFlow 0.3.2, 2026-10-07, Windows test machine with 32 logical processors. All benchmark data is synthetic; screenshots and local user data are excluded.
+本次比较 DeskFlow **0.3.3.0 x64** 与 Everything **1.4.1.1030 x64**，使用一台 Windows x64 电脑、32 个逻辑处理器。所有文件均由测试脚本生成；不读取个人文件、剪贴板记录或原软件的配置数据库。
 
-DeskFlow 0.3.2，2026-10-07，Windows 测试机，32 个逻辑处理器。工作负载全部为合成数据，没有公开用户文件、剪贴板或本机路径。
+| 程序 | 平均 CPU（整机） | 平均私有内存 | 私有内存采样峰值 | 平均工作集 |
+| --- | ---: | ---: | ---: | ---: |
+| DeskFlow 主程序 + 索引进程 | 0.0003% | 10.41 MiB | 10.56 MiB | 29.57 MiB |
+| Everything 独立实例 | 0.0000% | 6.25 MiB | 6.40 MiB | 20.84 MiB |
 
-| Scenario / 场景 | Sample / 采样 | Normalized CPU / 整机 CPU | Private memory / 私有内存 |
-| --- | --- | --- | --- |
-| Main app + ordinary index helper, rendered then hidden UI, empty monitored root, no OCR/recording / 主程序及普通索引辅助程序，界面绘制后隐藏，监控空目录，没有 OCR/录制 | 60.109 s | 0.00325% combined / 合计 | 11.75 MiB combined peak / 合计峰值 |
-| Ordinary index helper, 12,000 generated files / 普通索引辅助程序，12,000 个生成文件 | 8 s | 0.4761% | 5.62 MiB at sample end / 采样末值 |
+两者在这个基准中待机 CPU 都接近零，Everything 的内存更低。表中 Everything 的零值表示区间内没有可测出的进程 CPU 时间增量，不表示完全不执行代码。DeskFlow 的额外功能没有在本次测试中工作，因此这张表也不是完整功能的资源成本比较。
 
-Idle combined working-set peak was **40.93 MiB**; working set includes shared system DLL pages and differs from private memory. The active index test also required searchable progress, an indexed query under 500 ms and interruptible stop; observed stop took 47 ms.
+### 测试条件
 
-待机工作集合计峰值 **40.93 MiB**，工作集包含共享系统 DLL 页，与私有内存是不同指标。活动索引测试同时检查结果持续可查、已索引查询少于 500 ms、停止可中断；该次停止耗时 47 ms。
+- 同一个合成目录：12,000 个小文本文件、60 个子目录，每个子目录 200 个文件。Everything 额外将根目录本身计入目录数量，因此返回 61 个目录；DeskFlow 返回 60 个，两边文件数相同。
+- 两边均为普通目录索引及目录变更监控，启用文件大小和修改时间；没有全盘 NTFS/MFT 索引、管理员权限或服务进程。
+- 两边使用全新的独立配置和数据库。索引完成并确认条目数量后，额外等待 5 秒再采样。
+- 主界面从未显示或绘制，没有运行搜索、OCR、翻译、截图或录制，DeskFlow 历史库为空。
+- DeskFlow 以 `--tray --idle-test` 测试模式运行，关闭实际剪贴板监听/读取及全局快捷键注册，避免访问本机内容或影响正在使用的软件。
+- Everything 使用复制到测试目录的现有可执行文件和命名实例，禁用全盘自动纳入、更新检查及网络服务。原程序配置不变。
+- 同时采样三个独立进程，DeskFlow 两个进程逐点相加。每秒读取一次内存，共三轮各约 60 秒。
 
-CPU calculation: `100 × process CPU-time delta / wall seconds / logical processor count`. It describes the measured group and interval; brief bursts, different CPU counts and Task Manager's display may differ.
+原始数值、二进制 SHA256 与无个人信息的环境说明保存在[基准数据](benchmarks/resource-comparison.json)。
 
-CPU 计算为 `100 × 进程 CPU 时间增量 / 墙钟秒数 / 逻辑处理器数`，仅对应被测进程及采样区间。短时峰值、处理器数和任务管理器显示口径可能不同。
+### 逐轮结果
 
-## How to interpret 3% / 怎样看待 3%
+每轮在同一次启动中连续采样，不是三次冷启动。总表的平均值为三轮均值；采样峰值为每秒观察值中的最大值，不是启动以来的操作系统峰值。
 
-Sustained 3% while doing nothing is high for a background desktop utility. Initial indexing, repair, OCR and video encoding perform real work; their short-term CPU use can be higher. Check Tools → Index and runtime status to identify the current phase.
+| 轮次 | 时长 | 程序 | CPU（整机） | 平均私有内存 | 平均工作集 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| 1 | 60.031 秒 | DeskFlow 合计 | 0.0008% | 10.49 MiB | 29.61 MiB |
+| 1 | 60.031 秒 | Everything | 0.0000% | 6.33 MiB | 20.88 MiB |
+| 2 | 60.031 秒 | DeskFlow 合计 | 0.0000% | 10.40 MiB | 29.57 MiB |
+| 2 | 60.031 秒 | Everything | 0.0000% | 6.24 MiB | 20.84 MiB |
+| 3 | 60.016 秒 | DeskFlow 合计 | 0.0000% | 10.33 MiB | 29.54 MiB |
+| 3 | 60.016 秒 | Everything | 0.0000% | 6.18 MiB | 20.82 MiB |
 
-对于后台常驻工具，真正待机时持续 3% 偏高。首次索引、校准、OCR、视频编码正在执行工作，短时占用可以更高；在“工具 → 索引与运行状态”确认当前阶段。
+CPU 计算：`100 × 进程 CPU 时间增量之和 / 墙钟秒数 / 逻辑处理器数`，来自 Windows 的 `GetProcessTimes`。内存来自 `GetProcessMemoryInfo`；私有内存是进程独有的提交量，工作集是驻留物理页，包含共享系统页，两者不可直接互换。合计工作集可能重复统计进程间共享页。1 MiB = 1,048,576 字节。
 
-The indexing loop now uses actual thread CPU time to insert interruptible rests. Its normal background target is 0.5% of the machine, capped at a quarter of one core; large indivisible OS/SQLite operations can temporarily exceed it. Reducing CPU means initial indexing can take longer, while queries continue to use existing indexed rows.
+### 适用范围
 
-索引循环现在依据实际线程 CPU 时间插入可中断等待，日常后台目标为整机 0.5%，最多按四分之一单核预算工作。单次较大的系统或 SQLite 操作可能暂时超过目标。减少 CPU 会延长初次建库时间，已有索引结果继续可查。
+这是**小规模、隐藏界面、已建库的待机基准**，没有测量首次建库耗时、搜索延迟、显示界面、长期历史增长、全盘模式或千万级数据，也没有测量 OCR/录制时的峰值。启用完整剪贴板监听、打开预览或显示界面可能增加占用。不能将这些数字直接外推到真实长期使用。
 
-Long writer-side SQLite statements also yield through a progress callback, so large repair/delete operations do not wait until a whole statement finishes before pacing. Read-only foreground connections use their own query budgets. Startup cleanup selects runtime filenames through the name index rather than searching the full-text index.
+本机原来的两套索引覆盖范围不同，因此未使用它们的任务管理器数字作优劣结论。CPU 数量、软件版本、配置和操作系统缓存都会影响结果；重复测量应核对文件数量及模式。
 
-索引写入端的 SQLite 长语句也通过进度回调分时等待，批量校准/删除无需等整条语句结束才让出 CPU；前台只读连接使用独立查询预算。启动清理改用名称索引查找运行文件，避免多余的全文索引查询。
+## 怎样看待 3% CPU
 
-Local directory notification buffers are 256 KiB; network roots keep the required 64 KiB limit. The larger local queue reduces overflow repairs during file creation bursts. The recorder uses four slim indicator windows rather than a full-screen transparent surface, and redraws their color only when state changes.
+对于后台常驻工具，真正待机时持续 3% 偏高；首次索引、校准、OCR 和视频编码正在执行工作，短时占用可以更高。在“工具 → 索引与运行状态”确认阶段后再判断。
 
-本地目录通知缓冲区改为 256 KiB，网络目录保留 64 KiB 限制，减少大量文件变更导致的溢出校准。录制指示采用四条窄窗口边框，状态变化时才更新颜色，避免创建整屏透明图层。
+DeskFlow 当前采用以下资源管理方式：
 
-## Fast interactions / 快捷操作
+- 索引循环按实际线程 CPU 时间插入可中断等待。日常后台目标为整机 0.5%，最多按四分之一单核预算工作；较大的单次系统或 SQLite 操作仍可能暂时超过目标。
+- 写入端 SQLite 长语句通过进度回调让出 CPU；前台只读查询使用独立预算。启动清理使用名称索引，减少额外全文查询。
+- 本地目录通知缓冲区为 256 KiB，网络目录保留 64 KiB，减少大量变更造成的溢出校准。
+- 索引及历史存磁盘，列表缓存与图像任务有界；OCR 和编码按需启动，录制帧流式写盘。
+- 录制指示使用四条窄边框，状态变化时才更新颜色。
 
-- Alt+Q / Alt+W / Alt+S open files, history and capture; hover shows the current key. / 三个全局快捷键调起文件、历史和截图，悬停显示当前按键。
-- Double-click a filename to reveal it; double-click its directory to copy the full path. / 文件名双击定位，目录双击复制完整路径。
-- Lists load more on scroll; clipboard clicks open floating previews. / 列表滚动续载，剪贴板点击浮动预览。
-- Translate in the capture editor and hold Space for the original. / 截图内直接翻译，按住 Space 对照原图。
-- Start recording immediately; green/amber outlines show the region and pause state. / 点击直接录制，绿色/琥珀色范围框表示录制/暂停。
-- The GitHub icon opens this repository without adding another header row. / GitHub 图标打开当前仓库，不新增标题区域。
+减少后台 CPU 可能延长初次建库时间；已有条目仍可搜索。资源目标和具体测量值不是每种硬件、每种负载下的保证。
 
-## Reproduce / 复测
+## 快捷操作
 
-Build from source, then run `python scripts/idle_probe.py` (Python is needed only for this developer probe), or `ctest --test-dir build -C Release -R index_background_cpu -V`. Private-desktop image tests should run serially.
+- Alt+Q / Alt+W / Alt+S 调起文件、剪贴板历史和截图，悬停显示当前快捷键。
+- 文件名双击定位，目录双击复制完整路径。
+- 列表滚动续载，剪贴板点击浮动预览。
+- 截图内直接翻译，按住 Space 对照原图。
+- 点击直接录制，绿色/琥珀色范围框表示录制/暂停。
+- GitHub 图标直接打开当前仓库。
 
-构建后执行 `python scripts/idle_probe.py`（仅开发者测量脚本需要 Python），或 `ctest --test-dir build -C Release -R index_background_cpu -V`。使用私人桌面的图像测试应串行运行。
+## 复测方法
+
+先按[开发指南](DEVELOPMENT.md)构建 Release；准备现有 Everything 可执行文件以及官方 [ES 命令行工具](https://www.voidtools.com/en-us/support/everything/command_line_interface/)。Python 仅用于开发者基准，运行 DeskFlow 不需要它。
+
+在项目根目录运行，按实际安装位置替换下面的示例路径：
+
+```powershell
+python scripts/compare_resources.py --everything "C:/Tools/Everything/Everything.exe" --es "C:/Tools/Everything/es.exe" --desk-directory "build/Release" --files 12000 --seconds 60 --runs 3
+```
+
+脚本在 `artifacts/validation/comparison` 创建合成目录、独立索引及报告，确认两边索引完整后才测量，只退出自己创建的进程。它不会修改原配置或复制现有历史；不会自动删除生成的测试目录。Everything 的参数与索引设置依据官方[命令行选项](https://www.voidtools.com/support/everything/command_line_options/)及 [INI 配置](https://www.voidtools.com/en-uk/support/everything/ini/)。
+
+后台索引预算测试可运行 `ctest --test-dir build -C Release -R index_background_cpu -V`；界面绘制后收回托盘的单程序测试使用 `python scripts/idle_probe.py`。这些测试的场景不同，不应与本表混算。使用私人桌面的图像测试应串行执行。

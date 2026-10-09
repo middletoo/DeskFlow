@@ -1,0 +1,91 @@
+{
+  "files": 12000,
+  "desk_folders": 60,
+  "everything_folders": 61,
+  "logical_processors": 32,
+  "runs": [
+    {
+      "seconds": 60.030999999988126,
+      "results": {
+        "DeskFlow": {
+          "cpu_percent": 0.0008133818360515343,
+          "private_mean_mib": 10.488020833333334,
+          "private_peak_mib": 10.5625,
+          "working_set_mean_mib": 29.606510416666666,
+          "working_set_peak_mib": 29.65234375
+        },
+        "Everything": {
+          "cpu_percent": 0,
+          "private_mean_mib": 6.328450520833333,
+          "private_peak_mib": 6.3984375,
+          "working_set_mean_mib": 20.877669270833334,
+          "working_set_peak_mib": 20.9140625
+        }
+      }
+    },
+    {
+      "seconds": 60.03100000001723,
+      "results": {
+        "DeskFlow": {
+          "cpu_percent": 0,
+          "private_mean_mib": 10.396484375,
+          "private_peak_mib": 10.4609375,
+          "working_set_mean_mib": 29.56640625,
+          "working_set_peak_mib": 29.58984375
+        },
+        "Everything": {
+          "cpu_percent": 0,
+          "private_mean_mib": 6.240364583333333,
+          "private_peak_mib": 6.30078125,
+          "working_set_mean_mib": 20.840625,
+          "working_set_peak_mib": 20.86328125
+        }
+      }
+    },
+    {
+      "seconds": 60.015999999974156,
+      "results": {
+        "DeskFlow": {
+          "cpu_percent": 0,
+          "private_mean_mib": 10.33203125,
+          "private_peak_mib": 10.33203125,
+          "working_set_mean_mib": 29.54296875,
+          "working_set_peak_mib": 29.54296875
+        },
+        "Everything": {
+          "cpu_percent": 0,
+          "private_mean_mib": 6.17578125,
+          "private_peak_mib": 6.17578125,
+          "working_set_mean_mib": 20.81640625,
+          "working_set_peak_mib": 20.81640625
+        }
+      }
+    }
+  ],
+  "mode": "isolated_folder_index_idle_hidden_no_ocr_no_recording",
+  "clipboard": "suppressed_for_synthetic_fixture",
+  "binary_sha256": {
+    "DeskFlow": "89a3945b9b63858cd909d35059c388a5240ba15a1b981fdb42c4626895682e9f",
+    "DeskIndex": "c9dde9b75f3d2c8a43e656647b6f4ce5f507db71e1c6fbc1245710ccf561034c",
+    "Everything": "4fdc3daeabfc0775be9345d5cff92f5d2dc7d1b6dc111d6ffcd62e42bc9bdb30"
+  },
+  "versions": {
+    "DeskFlow": "0.3.3.0",
+    "Everything": "1.4.1.1030"
+  },
+  "architecture": "x64",
+  "operating_system": "Windows",
+  "conditions": {
+    "ui": "both main windows hidden and never painted",
+    "deskflow_processes": 2,
+    "everything_processes": 1,
+    "clipboard_history": "empty",
+    "deskflow_global_hotkeys": "disabled in idle-test mode",
+    "directory_mode": "ordinary folder indexing with filesystem notifications",
+    "size_and_modification_time": "enabled",
+    "whole_volume_or_elevated_indexing": false,
+    "settling_seconds": 5,
+    "memory_sample_interval_seconds": 1,
+    "launch_pattern": "three consecutive intervals within one launch"
+  }
+}
