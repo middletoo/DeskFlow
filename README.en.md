@@ -12,6 +12,21 @@ Three global shortcuts bring up the tools. Lists load more as you scroll, clipbo
 
 ## Resource use: measured against Everything
 
+### Observation of the existing applications on this computer
+
+Existing configuration, indexes and history were retained. Both applications were observed for approximately 61.72 seconds, with CPU normalized to 32 logical processors. Each total includes two existing processes. No test searches were issued during sampling.
+
+| Program | Mean CPU, whole machine | Mean private memory | Mean working set |
+| --- | ---: | ---: | ---: |
+| DeskFlow main app + index worker | 0.45% | 40.29 MiB | 47.44 MiB |
+| Everything, two existing processes | 2.97% | 1677.25 MiB | 1665.01 MiB |
+
+**In this observation, Everything used approximately 1.64 GiB of private memory, considerably more than DeskFlow's approximately 40 MiB.** The indexes cover different data: DeskFlow had about 575,000 entries and still reported background building/reconciliation. An earlier user-provided Everything screenshot showed about 17.6 million objects; its current count was not verified. CPU represents this minute's average, rather than long-term idle use. The gap cannot establish a corresponding advantage at equal index sizes.
+
+Only aggregate values are published, excluding real filenames, paths, history and screenshots of the user's desktop. See [the observation and its conditions](docs/PERFORMANCE.en-US.md).
+
+### Small same-folder idle benchmark
+
 Both programs indexed **the same synthetic folder containing 12,000 files and 60 subfolders**, on one Windows x64 machine with 32 logical processors. After indexing completed, both were sampled together for three idle intervals of approximately 60 seconds. DeskFlow includes its main app and index worker; Everything includes the isolated instance.
 
 **This is a hidden-UI file-index idle benchmark.** Neither main window was shown or painted. OCR, translation and recording were inactive. DeskFlow's test mode disabled clipboard reads and global hotkeys to avoid accessing local content or taking over the user's keys. These figures do not represent complete everyday use.

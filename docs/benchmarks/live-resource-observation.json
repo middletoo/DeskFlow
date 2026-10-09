@@ -1,0 +1,33 @@
+{
+  "Seconds": 61.719554,
+  "LogicalProcessors": 32,
+  "Results": [
+    {
+      "Name": "DeskFlow",
+      "Processes": 2,
+      "CpuPercent": 0.4548991373949332,
+      "PrivateMeanMiB": 40.289713541666664,
+      "WorkingSetMeanMiB": 47.44069010416667
+    },
+    {
+      "Name": "Everything",
+      "Processes": 2,
+      "CpuPercent": 2.9675246336841643,
+      "PrivateMeanMiB": 1677.25,
+      "WorkingSetMeanMiB": 1665.0078125
+    }
+  ],
+  "Scenario": "existing_user_instances_not_equal_workloads",
+  "QueriesDuringSampling": false,
+  "IndexCoverage": {
+    "DeskFlow": 574720,
+    "DeskFlowBuilding": true,
+    "EverythingApproximatePriorScreenshot": 17600000,
+    "EverythingCurrentCountVerified": false
+  },
+  "Versions": {
+    "DeskFlow": "0.3.3.0",
+    "Everything": "1.4.1.1030"
+  },
+  "Privacy": "Aggregates only. No filenames, paths, settings, history, process IDs or screenshots included."
+}
