@@ -4,6 +4,12 @@
 
 [简体中文](PERFORMANCE.md) · [Project overview](../README.en.md)
 
+## Version and index coverage
+
+Both measurement sets below come from pre-fix **0.3.3**. Fresh **0.3.4** installations request administrator indexing by default, preserve unfinished directory queues and MFT build checkpoints, and use USN monitoring on NTFS to reduce duplicate whole-volume reconciliations. Metadata enumeration privileges and reparse-directory classification expand coverage.
+
+The older live index had three incomplete directory-mode roots, about 56,000 queued directories and 69 reported access-denied directories. Its smaller entry count and memory footprint partly reflected incomplete coverage, so they cannot establish an equal-scale performance advantage. A complete equal-scale measurement of the new version has not been established; the older results are not its resource ceiling.
+
 ## Existing application observation: large indexes with different coverage
 
 Existing instances, window state, configuration, indexes and history were retained. Memory was sampled every second for 61.72 seconds; CPU is normalized to 32 logical processors. Each application total includes two processes. DeskFlow did not use the test mode that disables clipboard reads and hotkeys. No search, capture, OCR, translation or recording tests were issued during sampling.

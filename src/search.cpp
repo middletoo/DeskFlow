@@ -185,6 +185,34 @@ struct Handle {
         value = handle;
     }
 };
+bool enableBackupPrivilege() {
+    HANDLE raw = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &raw))
+        return false;
+    Handle token(raw);
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(nullptr, SE_BACKUP_NAME, &privileges.Privileges[0].Luid))
+        return false;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    SetLastError(ERROR_SUCCESS);
+    return AdjustTokenPrivileges(token.value, FALSE, &privileges, 0, nullptr, nullptr) &&
+           GetLastError() == ERROR_SUCCESS;
+}
+bool nameSurrogatePath(const std::wstring& path, DWORD attributes) {
+    if (!(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    Handle entry(CreateFileW(extended(path).c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (entry && GetFileInformationByHandleEx(entry.value, FileAttributeTagInfo, &tag, sizeof(tag)))
+        return IsReparseTagNameSurrogate(tag.ReparseTag) != 0;
+    WIN32_FIND_DATAW found{};
+    auto find = FindFirstFileW(extended(path).c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE) return true;
+    FindClose(find);
+    return IsReparseTagNameSurrogate(found.dwReserved0) != 0;
+}
 std::wstring finalDirectory(const std::wstring& path) {
     Handle directory(CreateFileW(extended(path).c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr));
     if(!directory) return {};
@@ -285,6 +313,11 @@ struct Database {
             return !found;
         };
         ensureColumn("ntfs_nodes","attributes","INTEGER NOT NULL DEFAULT 0");
+        ensureColumn("search_roots","build_phase","TEXT NOT NULL DEFAULT ''");
+        ensureColumn("search_roots","enum_cursor","INTEGER NOT NULL DEFAULT 0");
+        ensureColumn("search_roots","material_cursor","INTEGER");
+        ensureColumn("search_roots","build_stamp","INTEGER NOT NULL DEFAULT 0");
+        ensureColumn("search_roots","initial_usn","INTEGER NOT NULL DEFAULT 0");
         ensureColumn("scan_jobs","dirty","INTEGER NOT NULL DEFAULT 0");
         if(ensureColumn("files","short_ready","INTEGER NOT NULL DEFAULT 0")) execute(value,"UPDATE search_meta SET value='0' WHERE key IN('short_complete','short_cursor')");
         ensureColumn("files","type_key","TEXT NOT NULL DEFAULT ''");
@@ -322,7 +355,7 @@ struct Transaction {
 };
 
 void meta(sqlite3* db, const char* key, const std::wstring& value) {
-    Statement statement(db, "INSERT INTO search_meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    Statement statement(db, "INSERT INTO search_meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE search_meta.value<>excluded.value");
     statement.bytes(1, key); statement.text(2, value); statement.run();
 }
 void upsert(sqlite3* db, int64_t rootId, const std::wstring& path, const std::wstring& name,
@@ -477,7 +510,7 @@ struct DirectoryReader {
         handle.reset(CreateFileW(extended(path).c_str(),FILE_LIST_DIRECTORY,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
         if (!handle) { error=GetLastError(); ended=true; return; }
         FILE_ATTRIBUTE_TAG_INFO tag{};
-        if(GetFileInformationByHandleEx(handle.value,FileAttributeTagInfo,&tag,sizeof(tag)) && (tag.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {ended=true;return;}
+        if(GetFileInformationByHandleEx(handle.value,FileAttributeTagInfo,&tag,sizeof(tag)) && IsReparseTagNameSurrogate(tag.ReparseTag)) {ended=true;return;}
         BY_HANDLE_FILE_INFORMATION information{};
         if (GetFileInformationByHandle(handle.value,&information)) parentFrn=(static_cast<uint64_t>(information.nFileIndexHigh)<<32)|information.nFileIndexLow;
     }
@@ -630,7 +663,7 @@ public:
         }
         if (rootPaths.size()>32) throw std::runtime_error("At most 32 index roots are supported");
         Transaction transaction(database.value);
-        execute(database.value,"UPDATE search_roots SET complete=0 WHERE id IN(SELECT root_id FROM scan_jobs); DELETE FROM scan_queue; DELETE FROM scan_jobs;");
+        execute(database.value,"UPDATE search_roots SET complete=0 WHERE id IN(SELECT root_id FROM scan_jobs); UPDATE scan_jobs SET dirty=1;");
         for (auto& path:rootPaths) {
             path=normalize(path);
             bool covered=false;
@@ -644,8 +677,12 @@ public:
         }
         transaction.commit();
         for (auto& root:roots) {
-            watchers.push_back(std::make_unique<Watcher>(root.id,root.path));
-            if(!tryNtfs(root)) schedule(root.id,root.path);
+            if(!tryNtfs(root)) {
+                watchers.push_back(std::make_unique<Watcher>(root.id,root.path));
+                Statement pending(database.value,"SELECT 1 FROM scan_jobs WHERE root_id=?1 LIMIT 1");
+                pending.number(1,root.id);
+                if(!pending.row()) schedule(root.id,root.path);
+            }
         }
         publish();
     }
@@ -654,7 +691,7 @@ public:
         auto* volume=root(rootId);if(!volume) return false;
         for(;;) {
             DWORD attributes=GetFileAttributesW(extended(path).c_str());
-            if(attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT)) return true;
+            if(attributes!=INVALID_FILE_ATTRIBUTES && nameSurrogatePath(path, attributes)) return true;
             if(fold(path)==fold(volume->path)) return false;
             auto parent=fs::path(path).parent_path().wstring();
             if(parent.empty() || parent==path || !under(parent,volume->path)) return false;
@@ -694,9 +731,8 @@ public:
         Statement jobs(database.value,"SELECT 1 FROM scan_jobs LIMIT 1"); return jobs.row();
     }
     bool tryNtfs(Root& volume) {
-        // Directory roots use the same native implementation on every filesystem.
-        // A volume handle is attempted using the existing token; no UAC, journal
-        // creation, or privilege adjustment happens in this process.
+        // The launcher requests elevation; this worker reads an existing
+        // journal and never creates journals or changes filesystem ACLs.
         if(volume.path.size()!=3 || volume.path[1]!=L':' || volume.path[2]!=L'\\') return false;
         wchar_t filesystem[32]{};
         if(!GetVolumeInformationW(volume.path.c_str(),nullptr,0,&volume.serial,nullptr,nullptr,filesystem,32) || _wcsicmp(filesystem,L"NTFS")) return false;
@@ -708,31 +744,70 @@ public:
         BY_HANDLE_FILE_INFORMATION information{};
         if(!directory || !GetFileInformationByHandle(directory.value,&information)) {volume.volume.reset();return false;}
         volume.rootFrn=(static_cast<uint64_t>(information.nFileIndexHigh)<<32)|information.nFileIndexLow;
-        Statement stored(database.value,"SELECT journal_id,next_usn,serial,complete,mode FROM search_roots WHERE id=?1");stored.number(1,volume.id);stored.row();
-        bool resume=false;
-        if(sqlite3_column_type(stored.value,0)!=SQLITE_NULL) {
-            auto id=wide(sqlite3_column_text(stored.value,0));
-            auto serial=static_cast<DWORD>(sqlite3_column_int64(stored.value,2));
-            auto checkpoint=sqlite3_column_int64(stored.value,1);
-            resume=id==std::to_wstring(journal.UsnJournalID) && serial==volume.serial && sqlite3_column_int(stored.value,3)!=0 &&
-                checkpoint>=journal.FirstUsn && checkpoint<=journal.NextUsn && wide(sqlite3_column_text(stored.value,4))==L"ntfs";
-            if(resume) {volume.journalId=journal.UsnJournalID;volume.nextUsn=checkpoint;volume.phase=NtfsPhase::Journal;}
-        }
-        if(!resume) beginMft(volume,journal);
+        if(!restoreMft(volume,journal)) beginMft(volume,journal);
         return true;
+    }
+    bool restoreMft(Root& volume,const USN_JOURNAL_DATA_V0& journal) {
+        Statement stored(database.value,"SELECT journal_id,next_usn,serial,complete,mode,build_phase,enum_cursor,material_cursor,build_stamp,initial_usn FROM search_roots WHERE id=?1");
+        stored.number(1,volume.id);
+        if(!stored.row() || sqlite3_column_type(stored.value,0)==SQLITE_NULL ||
+           wide(sqlite3_column_text(stored.value,0))!=std::to_wstring(journal.UsnJournalID) ||
+           static_cast<DWORD>(sqlite3_column_int64(stored.value,2))!=volume.serial ||
+           wide(sqlite3_column_text(stored.value,4))!=L"ntfs") return false;
+        const auto checkpoint=sqlite3_column_int64(stored.value,1);
+        const auto stage=wide(sqlite3_column_text(stored.value,5));
+        const bool complete=sqlite3_column_int(stored.value,3)!=0;
+        if((complete || stage==L"journal") && checkpoint>=journal.FirstUsn && checkpoint<=journal.NextUsn) {
+            volume.journalId=journal.UsnJournalID;volume.nextUsn=checkpoint;volume.phase=NtfsPhase::Journal;
+            if(!complete) {
+                Statement pending(database.value,"SELECT 1 FROM scan_jobs WHERE root_id=?1 LIMIT 1");pending.number(1,volume.id);
+                if(!pending.row()) schedule(volume.id,volume.path);
+            }
+            return true;
+        }
+        const auto initial=sqlite3_column_int64(stored.value,9);
+        if((stage!=L"enumerate" && stage!=L"materialize") ||
+           initial<journal.FirstUsn || initial>journal.NextUsn || sqlite3_column_int64(stored.value,8)<=0) return false;
+        volume.phase=stage==L"enumerate"?NtfsPhase::Enumerate:NtfsPhase::Materialize;
+        volume.journalId=journal.UsnJournalID;volume.nextUsn=initial;volume.initialUsn=initial;
+        volume.enumCursor=static_cast<uint64_t>(sqlite3_column_int64(stored.value,6));
+        volume.materialFirst=sqlite3_column_type(stored.value,7)==SQLITE_NULL;
+        volume.materialCursor=sqlite3_column_int64(stored.value,7);
+        volume.buildStamp=sqlite3_column_int64(stored.value,8);
+        return true;
+    }
+    void checkpointMft(const Root& volume) {
+        Statement save(database.value,"UPDATE search_roots SET mode='ntfs',journal_id=?2,next_usn=?3,serial=?4,build_phase=?5,enum_cursor=?6,material_cursor=?7,build_stamp=?8,initial_usn=?9 WHERE id=?1");
+        save.number(1,volume.id);save.text(2,std::to_wstring(volume.journalId));save.number(3,volume.nextUsn);save.number(4,volume.serial);
+        save.text(5,volume.phase==NtfsPhase::Enumerate?L"enumerate":volume.phase==NtfsPhase::Materialize?L"materialize":L"journal");
+        save.number(6,static_cast<int64_t>(volume.enumCursor));
+        if(volume.materialFirst) sqlite3_bind_null(save.value,7);else save.number(7,volume.materialCursor);
+        save.number(8,volume.buildStamp);save.number(9,volume.initialUsn);save.run();
+    }
+    void discardDirectoryScans(int64_t rootId) {
+        if(active && active->rootId==rootId) active.reset();
+        for(auto it=pausedScans.begin();it!=pausedScans.end();) {
+            if(it->second.rootId==rootId) it=pausedScans.erase(it);else ++it;
+        }
+        Statement queues(database.value,"DELETE FROM scan_queue WHERE job_id IN(SELECT id FROM scan_jobs WHERE root_id=?1)");queues.number(1,rootId);queues.run();
+        Statement jobs(database.value,"DELETE FROM scan_jobs WHERE root_id=?1");jobs.number(1,rootId);jobs.run();
     }
     void beginMft(Root& volume,const USN_JOURNAL_DATA_V0& journal) {
         volume.phase=NtfsPhase::Enumerate;volume.enumCursor=0;volume.buildStamp=epoch();volume.initialUsn=journal.NextUsn;
         volume.journalId=journal.UsnJournalID;volume.nextUsn=journal.NextUsn;volume.materialFirst=true;volume.clearCache();
         Transaction transaction(database.value);
+        discardDirectoryScans(volume.id);
         Statement reset(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1");reset.number(1,volume.id);reset.run();
         Statement state(database.value,"UPDATE search_roots SET mode='ntfs',complete=0,serial=?2 WHERE id=?1");state.number(1,volume.id);state.number(2,volume.serial);state.run();
         node(volume.id,volume.rootFrn,volume.rootFrn,L"",true,volume.buildStamp,FILE_ATTRIBUTE_DIRECTORY);
+        checkpointMft(volume);
         transaction.commit();
     }
     void directoryFallback(Root& volume) {
         volume.phase=NtfsPhase::Directory;volume.volume.reset();volume.clearCache();
-        Statement state(database.value,"UPDATE search_roots SET mode='directory',journal_id=NULL,next_usn=NULL WHERE id=?1");state.number(1,volume.id);state.run();
+        Statement state(database.value,"UPDATE search_roots SET mode='directory',journal_id=NULL,next_usn=NULL,build_phase='' WHERE id=?1");state.number(1,volume.id);state.run();
+        if(std::none_of(watchers.begin(),watchers.end(),[&](const auto& watcher){return watcher->rootId==volume.id;}))
+            watchers.push_back(std::make_unique<Watcher>(volume.id,volume.path));
         schedule(volume.id,volume.path,true);
     }
     std::optional<std::wstring> nodePath(Root& volume,uint64_t file) {
@@ -748,14 +823,14 @@ public:
             if(std::find(visited.begin(),visited.end(),current)!=visited.end()) return std::nullopt;
             visited.push_back(current);
             if(current!=file) if(auto cached=volume.pathCache.find(current);cached!=volume.pathCache.end()) {
-                if(cached->second.second&FILE_ATTRIBUTE_REPARSE_POINT) return std::nullopt;
                 prefix=cached->second.first;break;
             }
             Statement get(database.value,"SELECT parent_frn,name,attributes FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");
             get.number(1,volume.id);get.number(2,static_cast<int64_t>(current));
             if(!get.row()) return std::nullopt;
             if(current==file) targetAttributes=static_cast<DWORD>(sqlite3_column_int64(get.value,2));
-            if(current!=file && (sqlite3_column_int64(get.value,2)&FILE_ATTRIBUTE_REPARSE_POINT)) return std::nullopt;
+            // MFT parent IDs describe physical entries, not link traversal.
+            // Cloud reparse directories may have real children in the MFT.
             auto parent=static_cast<uint64_t>(sqlite3_column_int64(get.value,0));
             auto name=wide(sqlite3_column_text(get.value,1));
             if(name.empty() || parent==current || name.find_first_of(L"\\/")!=std::wstring::npos) return std::nullopt;
@@ -795,9 +870,8 @@ public:
             auto* volume=root(item.root);
             if(volume && volume->phase!=NtfsPhase::Directory) {
                 materialize(*volume,static_cast<uint64_t>(item.frn),item.stamp);
-                Statement type(database.value,"SELECT attributes FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");type.number(1,item.root);type.number(2,item.frn);
-                bool reparseParent=type.row() && (sqlite3_column_int64(type.value,0)&FILE_ATTRIBUTE_REPARSE_POINT);
-                if(!reparseParent) {
+                // These are physical MFT relationships, with no directory-link traversal.
+                {
                     Statement children(database.value,"INSERT OR IGNORE INTO ntfs_refresh SELECT root_id,frn,?3 FROM ntfs_nodes WHERE root_id=?1 AND parent_frn=?2 AND frn<>parent_frn");
                     children.number(1,item.root);children.number(2,item.frn);children.number(3,item.stamp);children.run();
                 }
@@ -820,26 +894,33 @@ public:
         } while(FindNextFileNameW(links,&capacity,name.data()));
         FindClose(links);
     }
-    void journalChange(Root& volume,uint64_t file,uint64_t parent,int64_t,DWORD reason,DWORD attributes,const std::wstring& name) {
-        if(file==volume.rootFrn || name.empty()) return;
+    bool journalChange(Root& volume,uint64_t file,uint64_t parent,int64_t,DWORD reason,DWORD attributes,const std::wstring& name) {
+        if(file==volume.rootFrn || name.empty()) return false;
         auto parentPath=nodePath(volume,parent);
-        if(parentPath && ownIndexPath(join(*parentPath,name))) return;
+        if(parentPath && ownIndexPath(join(*parentPath,name))) return false;
         auto oldPath=nodePath(volume,file);
         auto stamp=epoch();
         if(reason&USN_REASON_FILE_DELETE) {
             if(oldPath) erase(database.value,volume.id,*oldPath);
             Statement removeFiles(database.value,"DELETE FROM files WHERE root_id=?1 AND frn=?2");removeFiles.number(1,volume.id);removeFiles.number(2,static_cast<int64_t>(file));removeFiles.run();
             Statement removeNode(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");removeNode.number(1,volume.id);removeNode.number(2,static_cast<int64_t>(file));removeNode.run();
-            volume.clearCache();return;
+            volume.clearCache();return true;
         }
-        if(reason&USN_REASON_RENAME_OLD_NAME) {if(oldPath) erase(database.value,volume.id,*oldPath);return;}
+        if(reason&USN_REASON_RENAME_OLD_NAME) {
+            // Enumeration may already contain the new name. Use the event's
+            // old parent/name instead of erasing that newer materialized path.
+            if(parentPath) erase(database.value,volume.id,join(*parentPath,name));
+            else if(oldPath) erase(database.value,volume.id,*oldPath);
+            return true;
+        }
         node(volume.id,file,parent,name,(attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,stamp,attributes);
         volume.clearCache();
         auto newPath=nodePath(volume,file);
         if(oldPath && newPath && fold(*oldPath)!=fold(*newPath)) erase(database.value,volume.id,*oldPath);
         materialize(volume,file,stamp);
-        if((attributes&FILE_ATTRIBUTE_DIRECTORY) && (reason&USN_REASON_RENAME_NEW_NAME) && !(attributes&FILE_ATTRIBUTE_REPARSE_POINT)) refresh(volume,file,stamp);
+        if((attributes&FILE_ATTRIBUTE_DIRECTORY) && (reason&(USN_REASON_RENAME_NEW_NAME|USN_REASON_FILE_CREATE))) refresh(volume,file,stamp);
         if(newPath && !(attributes&FILE_ATTRIBUTE_DIRECTORY) && (reason&(USN_REASON_HARD_LINK_CHANGE|USN_REASON_FILE_CREATE|USN_REASON_RENAME_NEW_NAME))) hardLinks(volume,file,*newPath,stamp);
+        return true;
     }
     bool ntfsBatch() {
         bool working=false;
@@ -848,9 +929,13 @@ public:
             DWORD length=0;
             if(volume.phase==NtfsPhase::Enumerate) {
                 working=true;
-                MFT_ENUM_DATA_V0 request{};request.StartFileReferenceNumber=volume.enumCursor;request.LowUsn=0;request.HighUsn=volume.initialUsn;
+                MFT_ENUM_DATA_V0 request{};request.StartFileReferenceNumber=volume.enumCursor;request.LowUsn=0;request.HighUsn=std::numeric_limits<USN>::max();
                 if(!DeviceIoControl(volume.volume.value,FSCTL_ENUM_USN_DATA,&request,sizeof(request),journalBuffer.data(),static_cast<DWORD>(journalBuffer.size()),&length,nullptr)) {
-                    if(GetLastError()==ERROR_HANDLE_EOF) {volume.phase=NtfsPhase::Materialize;volume.materialFirst=true;}
+                    if(GetLastError()==ERROR_HANDLE_EOF) {
+                        Transaction transaction(database.value);
+                        volume.phase=NtfsPhase::Materialize;volume.materialFirst=true;
+                        checkpointMft(volume);transaction.commit();
+                    }
                     else directoryFallback(volume);
                     continue;
                 }
@@ -866,6 +951,7 @@ public:
                     volume.clearCache();
                     for(auto file:partial) materialize(volume,file,volume.buildStamp);
                     volume.enumCursor=next;
+                    checkpointMft(volume);
                 }
                 transaction.commit();
                 if(!valid) directoryFallback(volume);
@@ -875,14 +961,17 @@ public:
                 nodes.number(1,volume.id);if(volume.materialFirst) sqlite3_bind_null(nodes.value,2);else nodes.number(2,volume.materialCursor);
                 std::vector<uint64_t> pending;while(nodes.row()) pending.push_back(static_cast<uint64_t>(sqlite3_column_int64(nodes.value,0)));
                 if(pending.empty()) {
+                    Transaction transaction(database.value);
                     volume.phase=NtfsPhase::Journal;volume.nextUsn=volume.initialUsn;
                     // MFT contains one name per file ID. A native supplement
                     // records every hardlink path and accessible-directory scope.
                     schedule(volume.id,volume.path);
+                    checkpointMft(volume);transaction.commit();
                 } else {
                     Transaction transaction(database.value);
                     for(auto file:pending) materialize(volume,file,volume.buildStamp);
-                    transaction.commit();volume.materialFirst=false;volume.materialCursor=static_cast<int64_t>(pending.back());
+                    volume.materialFirst=false;volume.materialCursor=static_cast<int64_t>(pending.back());
+                    checkpointMft(volume);transaction.commit();
                 }
             } else if(Clock::now()>=volume.journalTick) {
                 volume.journalTick=Clock::now()+std::chrono::milliseconds(750);
@@ -894,10 +983,15 @@ public:
                 if(length<sizeof(USN)) {directoryFallback(volume);continue;}
                 int64_t next=0;memcpy(&next,journalBuffer.data(),sizeof(next));
                 Transaction transaction(database.value);
-                bool valid=search_detail::visitUsnRecords(journalBuffer.data()+sizeof(USN),length-sizeof(USN),[&](uint64_t file,uint64_t parent,int64_t stamp,DWORD reason,DWORD attributes,const std::wstring& name) {journalChange(volume,file,parent,stamp,reason,attributes,name);});
+                bool changed=false;
+                bool valid=search_detail::visitUsnRecords(journalBuffer.data()+sizeof(USN),length-sizeof(USN),[&](uint64_t file,uint64_t parent,int64_t stamp,DWORD reason,DWORD attributes,const std::wstring& name) {changed=journalChange(volume,file,parent,stamp,reason,attributes,name)||changed;});
                 if(valid) {
-                    Statement checkpoint(database.value,"UPDATE search_roots SET journal_id=?2,next_usn=?3,serial=?4,mode='ntfs' WHERE id=?1");
-                    checkpoint.number(1,volume.id);checkpoint.text(2,std::to_wstring(volume.journalId));checkpoint.number(3,next);checkpoint.number(4,volume.serial);checkpoint.run();
+                    // Own DB/WAL records advance the in-memory cursor without
+                    // another checkpoint write that would generate more USN records.
+                    if(changed && next!=volume.nextUsn) {
+                        Statement checkpoint(database.value,"UPDATE search_roots SET journal_id=?2,next_usn=?3,serial=?4,mode='ntfs',build_phase='journal' WHERE id=?1");
+                        checkpoint.number(1,volume.id);checkpoint.text(2,std::to_wstring(volume.journalId));checkpoint.number(3,next);checkpoint.number(4,volume.serial);checkpoint.run();
+                    }
                     volume.nextUsn=next;
                 }
                 transaction.commit();
@@ -978,7 +1072,7 @@ public:
                 volume->clearCache();
             }
             if(item.attributes&FILE_ATTRIBUTE_DIRECTORY) {
-                if(item.attributes&FILE_ATTRIBUTE_REPARSE_POINT) ++reparse;
+                if(nameSurrogatePath(path,item.attributes)) ++reparse;
                 else enqueue(scan.id,path);
             }
         }
@@ -998,12 +1092,13 @@ public:
             return;
         }
         auto name=fs::path(path).filename().wstring();
-        if((information.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) && (information.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {
+        const bool surrogate=nameSurrogatePath(path,information.dwFileAttributes);
+        if((information.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) && surrogate) {
             eraseDescendants(database.value,rootId,path);
             if(active && active->rootId==rootId && active->directory && under(active->path,path)) active->directory.reset();
         }
         upsert(database.value,rootId,path,name,information.dwFileAttributes,(static_cast<uint64_t>(information.nFileSizeHigh)<<32)|information.nFileSizeLow,epoch(),0,true,fileTicks(information.ftLastWriteTime));
-        if((action==FILE_ACTION_ADDED || action==FILE_ACTION_RENAMED_NEW_NAME) && (information.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) && !(information.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) schedule(rootId,path);
+        if((action==FILE_ACTION_ADDED || action==FILE_ACTION_RENAMED_NEW_NAME) && (information.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) && !surrogate) schedule(rootId,path);
     }
     void notifications() {
         for(auto& watcher:watchers) {
@@ -1739,6 +1834,8 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
     SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_BEGIN);
     int outcome=0;
     try {
+        // Metadata enumeration only; never change directory ACLs or ownership.
+        enableBackupPrivilege();
         Indexer indexer(directory);
         const unsigned processors=std::max(1u,(unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
         WriterPacing sqlPacing(indexer.database.value,stop.value,parent.value,processors);

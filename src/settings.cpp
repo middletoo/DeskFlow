@@ -14,7 +14,7 @@ Settings loadSettings(const std::filesystem::path &path) {
     nlohmann::json j;
     file >> j;
     s.autoStart = j.value("autoStart", false);
-    s.elevatedIndex = j.value("elevatedIndex", false);
+    s.elevatedIndex = j.value("elevatedIndex", true);
     s.dark = j.value("dark", false);
     s.maximumEntryMiB = j.value("maximumEntryMiB", 32u);
     s.imageQuotaGiB = j.value("imageQuotaGiB", 5u);

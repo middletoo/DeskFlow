@@ -103,6 +103,8 @@ struct Result {
     int type = 0, generation = 0;
     int listAction = 0, listRequest = 0;
     bool listEnd = false;
+    bool elevatedWorker = false, workerRestartFailed = false;
+    HANDLE stoppedWorker = nullptr;
     int64_t listTotal = 0;
     std::vector<ListPage> listPages;
     std::wstring status, text;
@@ -112,6 +114,8 @@ struct Result {
     ClipPayload payload;
     HBITMAP bitmap = nullptr;
     ~Result() {
+        if (stoppedWorker)
+            CloseHandle(stoppedWorker);
         if (bitmap)
             DeleteObject(bitmap);
     }
@@ -303,6 +307,7 @@ class Application {
     HFONT uiFont = nullptr;
     NOTIFYICONDATAW tray{};
     HANDLE workerHandle = nullptr;
+    bool workerRestartPending = false;
     HANDLE setupHandle = nullptr;
     std::filesystem::path setupReceipt;
     DWORD taskbarMessage = 0;
@@ -1741,6 +1746,20 @@ class Application {
                 listHeadDirty = true;query(false, true);
             }
         } else if (r->type == 11) {
+            workerRestartPending = false;
+            if (r->workerRestartFailed) {
+                workerHandle = r->stoppedWorker;
+                r->stoppedWorker = nullptr;
+                status = L"旧索引仍在结束操作，请稍后重试；已有结果继续可用";
+                invalidate();
+                return;
+            }
+            if (!r->elevatedWorker) {
+                launchWorker();
+                status = L"已按当前权限启动索引，已有结果继续可用";
+                invalidate();
+                return;
+            }
             auto executable = executableDirectory() / L"DeskIndex.exe";
             auto parameters = L"--data \"" + data.wstring() + L"\" --parent " +
                               std::to_wstring(GetCurrentProcessId());
@@ -2002,22 +2021,35 @@ class Application {
         } else
             status = L"索引进程未启动，请确认 DeskIndex.exe 位于程序目录";
     }
-    void elevateIndex() {
+    void elevateIndex() { restartIndex(true); }
+    void restartIndex(bool elevated) {
         if (smoke) {
             status = L"验证模式不请求管理员权限";
             return;
         }
+        if (workerRestartPending) {
+            status = L"索引模式正在切换，请完成当前操作";
+            invalidate();
+            return;
+        }
+        workerRestartPending = true;
         auto process = workerHandle;
         workerHandle = nullptr;
-        clipboardTasks.add([this, process] {
+        clipboardTasks.add([this, process, elevated] {
+            auto r = std::make_unique<Result>();
+            r->type = 11;
+            r->elevatedWorker = elevated;
             stopIndexWorker(data);
             if (process) {
-                WaitForSingleObject(process, 5000);
+                if (WaitForSingleObject(process, 5000) != WAIT_OBJECT_0) {
+                    r->workerRestartFailed = true;
+                    r->stoppedWorker = process;
+                    publish(r.release());
+                    return;
+                }
                 CloseHandle(process);
             }
-            auto r = new Result;
-            r->type = 11;
-            publish(r);
+            publish(r.release());
         });
         status = L"正在切换索引模式…";
         invalidate();
@@ -2232,9 +2264,10 @@ class Application {
                     AddClipboardFormatListener(hwnd);
                 app->taskbarMessage = RegisterWindowMessageW(L"TaskbarCreated");
                 app->addTray();
-                app->launchWorker();
                 if (app->config.elevatedIndex && !app->smoke)
                     SetTimer(hwnd, 14, 500, nullptr);
+                else
+                    app->launchWorker();
                 if (app->smoke)
                     SetTimer(hwnd, 9, app->testDurationMs, nullptr);
                 return 0;
@@ -2734,6 +2767,7 @@ LRESULT CALLBACK Application::settingsProcedure(HWND hwnd, UINT msg, WPARAM wp, 
                     app->registerKeys(app->config);
                     throw;
                 }
+                const bool indexModeChanged = app->config.elevatedIndex != desired.elevatedIndex;
                 app->config = desired;
                 if (app->history)
                     app->history->setLimits((size_t)desired.maximumEntryMiB * 1024 * 1024,
@@ -2741,6 +2775,8 @@ LRESULT CALLBACK Application::settingsProcedure(HWND hwnd, UINT msg, WPARAM wp, 
                 app->updateAutoStart();
                 app->status = L"设置已保存";
                 DestroyWindow(hwnd);
+                if (indexModeChanged)
+                    app->restartIndex(desired.elevatedIndex);
                 app->invalidate();
                 return 0;
             }

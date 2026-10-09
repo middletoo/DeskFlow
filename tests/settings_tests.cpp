@@ -8,6 +8,8 @@ int main() {
                 (L"DeskFlow-settings-test-" + std::to_wstring(GetCurrentProcessId()) + L".json");
     try {
         desk::Settings s;
+        if (!s.elevatedIndex || !desk::loadSettings(path).elevatedIndex)
+            throw std::runtime_error("fresh installations must request administrator indexing by default");
         if(s.hotkeys[0].key!='Q'||s.hotkeys[1].key!='W'||s.hotkeys[2].key!='S'||s.hotkeys[0].modifiers!=MOD_ALT||s.hotkeys[1].modifiers!=MOD_ALT||s.hotkeys[2].modifiers!=MOD_ALT)throw std::runtime_error("Alt Q/W/S defaults incorrect");
         s.translation.deeplKey = L"test-secret-key:fx";
         s.hotkeys[0].key = 'F';
@@ -27,6 +29,10 @@ int main() {
             throw std::runtime_error("hotkey configuration not preserved");
         if (!read.elevatedIndex)
             throw std::runtime_error("administrator indexing preference must survive restart");
+        s.elevatedIndex = false;
+        desk::saveSettings(path, s);
+        if (desk::loadSettings(path).elevatedIndex)
+            throw std::runtime_error("explicit ordinary-index preference must be preserved");
         if (read.maximumEntryMiB != 64 || read.imageQuotaGiB != 20)
             throw std::runtime_error("storage budgets not preserved");
         s.hotkeys={{{VK_SPACE,MOD_CONTROL|MOD_ALT},{'V',MOD_CONTROL|MOD_ALT},{'A',MOD_CONTROL|MOD_ALT}}};desk::saveSettings(path,s);auto upgraded=desk::loadSettings(path);

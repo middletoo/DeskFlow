@@ -64,6 +64,21 @@ int main() {
             auto hwnd = CreateWindowExW(0, wc.lpszClassName, L"Host tests", WS_OVERLAPPED, 0, 0,
                                         1000, 660, nullptr, nullptr, app.instance, &app);
             require(hwnd != nullptr, "host window creation");
+            require(app.workerHandle==nullptr&&!app.workerRestartPending,
+                    "isolated host tests must not start or elevate a real index worker");
+            {
+                auto failed=new Result;
+                failed->type=11;failed->workerRestartFailed=true;
+                failed->stoppedWorker=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+                require(failed->stoppedWorker!=nullptr,"worker handle fixture");
+                auto retained=failed->stoppedWorker;
+                app.workerRestartPending=true;
+                app.receive(failed);
+                require(!app.workerRestartPending&&app.workerHandle==retained&&
+                        WaitForSingleObject(app.workerHandle,0)==WAIT_TIMEOUT,
+                        "failed stop must retain the original worker handle without launching a second writer");
+                CloseHandle(app.workerHandle);app.workerHandle=nullptr;
+            }
             require(app.functionHint(0).find(L"Q")!=std::wstring::npos&&app.functionHint(1).find(L"W")!=std::wstring::npos&&app.functionHint(2).find(L"S")!=std::wstring::npos,"function hover hints must reflect current Alt Q/W/S keys");
             auto first = app.history->append(payload(L"旧历史内容"));
             app.mode = 1;

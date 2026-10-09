@@ -9,7 +9,7 @@ struct Hotkey {
 struct Settings {
     TranslationConfig translation;
     bool autoStart = false;
-    bool elevatedIndex = false;
+    bool elevatedIndex = true;
     bool dark = false;
     unsigned maximumEntryMiB = 32, imageQuotaGiB = 5;
     std::wstring excludedApps = L"KeePass.exe;1Password.exe;Bitwarden.exe";

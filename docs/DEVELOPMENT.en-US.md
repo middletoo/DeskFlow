@@ -21,10 +21,10 @@ Portable search, history and capture work directly. Windows OCR needs a register
 For your own development package, generate and inspect a development certificate, then explicitly trust only that known leaf in Trusted People on your development machine and register the package.
 
 ```powershell
-pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.3.0
+pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.4.1
 # After inspecting your certificate, use elevated PowerShell:
 Import-Certificate -FilePath artifacts/msix/DeskFlow-Development.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.3.0-x64.msix
+Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.4.1-x64.msix
 ```
 
 Do not commit PFX/private keys, personal settings or generated trust material.

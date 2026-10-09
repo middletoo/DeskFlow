@@ -34,7 +34,7 @@ Name, directory, size and local modification time are shown by default; folder s
 - Ctrl/Shift select multiple files; Ctrl+C/X copy/cut, F2 renames and Delete uses the Recycle Bin.
 - Use the Windows context menu or drag selected items out. Export and preview are in Search.
 
-The initial independent index builds in the background; existing entries remain searchable. See Tools → Index and runtime status. Settings provides optional elevated NTFS indexing for protected directories, with Windows UAC confirmation.
+The initial independent index builds in the background; existing entries remain searchable. See Tools → Index and runtime status. Fresh installations request administrator privileges for the index worker by default, with Windows UAC confirmation; the UI retains normal privileges. Canceling falls back to current permissions. Existing explicit settings remain in effect and can be changed in Settings. NTFS uses MFT/USN where available, with directory scanning as fallback. Unfinished builds resume after restart.
 
 ## Keep clipboard history
 

@@ -1,4 +1,4 @@
-param([string]$PackagePath,[string]$OutputDirectory='',[string]$Version='0.3.3.0',
+param([string]$PackagePath,[string]$OutputDirectory='',[string]$Version='0.3.4.1',
       [ValidateSet('x64','x86','ARM64')][string]$Architecture='x64',
       [string]$BinaryDirectory='', [string]$CertificatePath='')
 $ErrorActionPreference='Stop'
