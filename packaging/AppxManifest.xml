@@ -5,7 +5,7 @@
          xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap uap10 desktop rescap">
-  <Identity Name="DeskFlow.Desktop" Publisher="CN=DeskFlow Development" Version="0.3.4.1" ProcessorArchitecture="x64" />
+  <Identity Name="DeskFlow.Desktop" Publisher="CN=DeskFlow Development" Version="0.3.5.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>DeskFlow 桌面提效</DisplayName>
     <PublisherDisplayName>DeskFlow Development</PublisherDisplayName>

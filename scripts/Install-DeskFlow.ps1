@@ -1,5 +1,6 @@
-[CmdletBinding()]
-param([string]$BundleDirectory=$PSScriptRoot,[switch]$ValidateOnly,[int]$ParentProcessId=0,[long]$ParentWindowHandle=0,[switch]$NoLaunch,[string]$ReceiptPath="")
+﻿[CmdletBinding()]
+param([string]$BundleDirectory=$PSScriptRoot,[switch]$ValidateOnly,[int]$ParentProcessId=0,[long]$ParentWindowHandle=0,[switch]$NoLaunch,[string]$ReceiptPath="",
+      [string]$DataDirectory='', [string]$SourceDataDirectory='', [string]$SetupExecutablePath='')
 $ErrorActionPreference='Stop'
 trap {
     if(!$ValidateOnly){
@@ -53,6 +54,22 @@ if($ValidateOnly){
     @{validated=$true;publisher=$certificate.Subject;thumbprint=$certificate.Thumbprint;package=$packagePath;signatureStatus=[string]$signature.Status;changesMade=$false} | ConvertTo-Json -Compress
     exit 0
 }
+if($DataDirectory){
+    if(!$SourceDataDirectory -or !$SetupExecutablePath){throw 'The data-folder choice requires the reviewed setup wizard.'}
+    $setupSignature=Get-AuthenticodeSignature -LiteralPath $SetupExecutablePath
+    $setupOwnChain=$false
+    if($setupSignature.Status -eq 'UnknownError' -and $setupSignature.SignerCertificate){
+        $setupChain=[Security.Cryptography.X509Certificates.X509Chain]::new()
+        $setupChain.ChainPolicy.RevocationMode=[Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $setupChain.Build($setupSignature.SignerCertificate) | Out-Null
+        $setupFlags=0;foreach($state in $setupChain.ChainStatus){$setupFlags=$setupFlags -bor [int]$state.Status}
+        $setupOwnChain=($setupFlags -eq [int][Security.Cryptography.X509Certificates.X509ChainStatusFlags]::UntrustedRoot);$setupChain.Dispose()
+    }
+    if(!$setupSignature.SignerCertificate -or $setupSignature.SignerCertificate.Thumbprint -ne $allowedThumbprint -or
+       ($setupSignature.Status -notin @('Valid','NotTrusted') -and !$setupOwnChain)){throw 'The data migration helper is not signed by the reviewed publisher.'}
+    if(![IO.Path]::IsPathRooted($DataDirectory) -or ![IO.Path]::IsPathRooted($SourceDataDirectory)){throw 'Data folders require full local paths.'}
+    $setupLock=[IO.File]::Open($SetupExecutablePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+}
 Write-Host 'DeskFlow: Windows may ask for administrator approval once.'
 Write-Host 'The verified DeskFlow signing certificate will be trusted in LocalMachine/TrustedPeople.'
 $receiptRoot=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DeskFlow-Setup'
@@ -98,6 +115,18 @@ public static class DeskFlowSetupWindow {
         if(!$parent.WaitForExit(45000)){throw 'DeskFlow is still finishing a task. Please exit it and run the installer again.'}
     }
 }
+if($DataDirectory){
+    $migrationReceipt=Join-Path $receiptRoot ('migration-'+[Guid]::NewGuid().ToString('N')+'.json')
+    $sourceArgument='"'+[IO.Path]::GetFullPath($SourceDataDirectory).TrimEnd('\')+'"'
+    $targetArgument='"'+[IO.Path]::GetFullPath($DataDirectory).TrimEnd('\')+'"'
+    $receiptArgument='"'+$migrationReceipt+'"'
+    $migrationProcess=Start-Process -FilePath $SetupExecutablePath -WindowStyle Hidden -PassThru -Wait -ArgumentList @('--migrate','--source',$sourceArgument,'--target',$targetArgument,'--receipt',$receiptArgument)
+    if(!(Test-Path -LiteralPath $migrationReceipt)){throw 'Data migration did not finish. The source folder and previous storage setting remain available.'}
+    $migration=Get-Content -LiteralPath $migrationReceipt -Raw -Encoding utf8 | ConvertFrom-Json
+    if(!$migration.ok){throw $migration.error}
+    if($migrationProcess.ExitCode -ne 0){throw 'Data migration returned an error. The source folder remains available.'}
+    $setupLock.Dispose()
+}
 if((Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash -ne $manifest.packageSha256){throw 'Package changed during administrator confirmation.'}
 $finalSignature=Get-AuthenticodeSignature -LiteralPath $packagePath
 if($finalSignature.Status -ne 'Valid' -or $finalSignature.SignerCertificate.Thumbprint -ne $allowedThumbprint){throw 'Package signer or signature changed before deployment.'}
@@ -105,7 +134,9 @@ Add-AppxPackage -Path $packagePath -ErrorAction Stop
 $installed=Get-AppxPackage -Name 'DeskFlow.Desktop' | Where-Object { $_.Publisher -eq $allowedPublisher } | Sort-Object Version -Descending | Select-Object -First 1
 $payloadLock.Dispose();$helperLock.Dispose()
 if(!$installed){throw 'Windows did not register DeskFlow for the current user.'}
+
 $receipt=@{ok=$true;installedAt=(Get-Date).ToString('o');packageFamilyName=$installed.PackageFamilyName;version=[string]$installed.Version;installLocation=$installed.InstallLocation;certificateThumbprint=$allowedThumbprint;trustStore='LocalMachine/TrustedPeople'}
+if($DataDirectory){$receipt.dataDirectory=$DataDirectory;$receipt.sourceDataRetained=$true}
 $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $receiptRoot 'installed.json') -Encoding utf8
 if($ReceiptPath){$receipt | ConvertTo-Json | Set-Content -LiteralPath $ReceiptPath -Encoding utf8}
 if(!$NoLaunch){Start-Process -FilePath explorer.exe -WindowStyle Hidden -ArgumentList ('shell:AppsFolder\'+$installed.PackageFamilyName+'!DeskFlow')}

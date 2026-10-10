@@ -2804,7 +2804,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     bool smoke = false, trayOnly = false;
     std::filesystem::path ocrVerifyImage, ocrVerifyReport;
     UINT lifetimeMs = 4000;
-    auto dir = dataDirectory();
+    std::filesystem::path dir;
     for (int i = 1; i < argc; i++) {
         std::wstring arg = argv[i];
         if (arg == L"--smoke-test" || arg == L"--self-test")
@@ -2823,6 +2823,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             ocrVerifyReport = argv[++i];
     }
     LocalFree(argv);
+    if(dir.empty()){
+        try{dir=dataDirectory();}
+        catch(const std::exception& error){MessageBoxW(nullptr,userError(error).c_str(),L"DeskFlow 数据目录不可用",MB_OK|MB_ICONERROR);OleUninitialize();return 2;}
+    }
     if (!ocrVerifyImage.empty() && !ocrVerifyReport.empty()) {
         nlohmann::json report;
         int code = 0;

@@ -213,6 +213,41 @@ void overlayTests() {
             SendMessageW(edit, WM_KILLFOCUS, reinterpret_cast<WPARAM>(overlay), 0);
             SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
         }
+        const auto initialText=desk::capture_detail::annotationInfo();
+        check(initialText.textCount==1&&!initialText.editing,"committed text remains one annotation");
+        const POINT textPoint{initialText.firstTextOrigin.x+4,initialText.firstTextOrigin.y+6};
+        drag(overlay,textPoint,{textPoint.x-10,textPoint.y+4});
+        const auto movedText=desk::capture_detail::annotationInfo();
+        check(movedText.textCount==1&&!movedText.editing&&movedText.firstTextOrigin.x==initialText.firstTextOrigin.x-10,
+              "clicking text drags the existing annotation instead of creating another editor");
+        BYTE keyboard[256]{},savedKeyboard[256]{};GetKeyboardState(savedKeyboard);memcpy(keyboard,savedKeyboard,sizeof(keyboard));
+        keyboard[VK_CONTROL]|=0x80;SetKeyboardState(keyboard);
+        SendMessageW(overlay,WM_KEYDOWN,'Z',0);
+        check(desk::capture_detail::annotationInfo().firstTextOrigin.x==initialText.firstTextOrigin.x,"undo restores a text move");
+        SendMessageW(overlay,WM_KEYDOWN,'Y',0);
+        check(desk::capture_detail::annotationInfo().firstTextOrigin.x==movedText.firstTextOrigin.x,"redo restores a text move");
+        SendMessageW(overlay,WM_KEYDOWN,'Z',0);SetKeyboardState(savedKeyboard);
+        POINT textClient=textPoint;ScreenToClient(overlay,&textClient);
+        SendMessageW(overlay,WM_LBUTTONDBLCLK,MK_LBUTTON,MAKELPARAM(textClient.x,textClient.y));
+        edit=FindWindowExW(overlay,nullptr,L"EDIT",nullptr);
+        wchar_t original[64]{};if(edit)GetWindowTextW(edit,original,64);
+        check(edit&&std::wstring(original)==L"测试 Test","double-click reopens the existing text for editing");
+        if(edit){SetWindowTextW(edit,L"编辑 Edit");SendMessageW(edit,WM_KEYDOWN,VK_RETURN,0);}
+        check(desk::capture_detail::annotationInfo().textCount==1,"re-edit replaces text without adding an annotation");
+        SendMessageW(overlay,WM_LBUTTONDBLCLK,MK_LBUTTON,MAKELPARAM(textClient.x,textClient.y));
+        edit=FindWindowExW(overlay,nullptr,L"EDIT",nullptr);
+        if(edit){SetWindowTextW(edit,L"discarded synthetic edit");SendMessageW(edit,WM_KEYDOWN,VK_ESCAPE,0);}
+        SendMessageW(overlay,WM_LBUTTONDBLCLK,MK_LBUTTON,MAKELPARAM(textClient.x,textClient.y));
+        edit=FindWindowExW(overlay,nullptr,L"EDIT",nullptr);
+        wchar_t kept[64]{};if(edit)GetWindowTextW(edit,kept,64);
+        check(edit&&std::wstring(kept)==L"编辑 Edit","canceling re-edit preserves the committed text");
+        if(edit){SetWindowTextW(edit,L"测试 Test");SendMessageW(edit,WM_KEYDOWN,VK_RETURN,0);}
+        const auto beforeShadow=desk::capture_detail::hoverInfo();const auto beforeShadowAnnotations=desk::capture_detail::annotationInfo().count;
+        drag(overlay,{60,60},{70,70});
+        const auto afterShadow=desk::capture_detail::hoverInfo();
+        check(afterShadow.selected&&EqualRect(&beforeShadow.region,&afterShadow.region)&&
+              desk::capture_detail::annotationInfo().count==beforeShadowAnnotations,
+              "shadow clicks leave the selected region and annotations intact");
         click(overlay, {110, 160});
         HWND nextEdit = FindWindowExW(overlay, nullptr, L"EDIT", nullptr);
         if (nextEdit) SetWindowTextW(nextEdit, L"第二段");

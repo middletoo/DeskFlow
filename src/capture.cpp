@@ -16,6 +16,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -145,11 +146,13 @@ bool writePng(HBITMAP bitmap, const std::filesystem::path& path, const std::atom
 }
 enum class Tool { Select, Rectangle, Arrow, Pen, Text, Mosaic, Ellipse, Number };
 enum class Action { Select, Rectangle, Arrow, Pen, Text, Mosaic, Ellipse, Number, Undo, Redo, Copy, Save, Ocr, Translate, Pin, Long, Gif, Mp4, Cancel };
-enum class Drag { None, Select, Move, Resize, Annotate };
+enum class Drag { None, Select, Move, Resize, Annotate, MoveText };
 struct Annotation {
     Tool tool{}; std::vector<POINT> points; RECT box{}; std::wstring text;
     DWORD color{0xffff626d}; float thickness{3.0f}; int number{};
+    mutable RECT measuredText{}; mutable bool measuredTextKnown=false;
 };
+struct AnnotationChange { size_t index{}; std::optional<Annotation> before, after; };
 struct SaveTask { std::atomic<bool> cancelled{}; UINT_PTR id{}; image_tools_detail::MemoryLease memory; };
 struct TranslationTask {
     std::atomic_bool cancelled{}; UINT_PTR id{};
@@ -182,7 +185,10 @@ struct Overlay {
     float scale{1}; DWORD color{0xffff626d}; float thickness{3};
     BitmapSurface snapshot, dimmed, paint, mosaic, translated;
     RECT translatedSelection{};
-    std::vector<Annotation> annotations, redoAnnotations; Annotation draft; CaptureCallback callback; RegionCallback recordingCallback; InlineTranslation translation;
+    std::vector<Annotation> annotations; std::vector<AnnotationChange> undoChanges, redoChanges;
+    Annotation draft, textDragBefore;
+    int editedAnnotation=-1, draggedText=-1; POINT textOrigin{}; DWORD editColor{};
+    CaptureCallback callback; RegionCallback recordingCallback; InlineTranslation translation;
     std::array<RECT, std::size(paletteColors)> colorRects{};
     std::array<RECT, std::size(paletteWidths)> widthRects{};
     std::vector<Button> buttons; ULONG_PTR gdiplus{}; std::shared_ptr<SaveTask> saveTask;
@@ -243,12 +249,52 @@ struct Overlay {
         RECT clipped{}; IntersectRect(&clipped, &search.result, &screen); OffsetRect(&clipped, -screen.left, -screen.top);
         if (!EqualRect(&clipped, &hoverSelection)) { hoverSelection = clipped; invalidate(); }
     }
-    void addAnnotation(Annotation annotation) { if (annotations.size() < 256) { annotations.push_back(std::move(annotation)); redoAnnotations.clear(); } }
+    void rememberChange(size_t index,std::optional<Annotation> before,std::optional<Annotation> after) {
+        if(undoChanges.size()>=256) undoChanges.erase(undoChanges.begin());
+        undoChanges.push_back({index,std::move(before),std::move(after)});redoChanges.clear();
+    }
+    void addAnnotation(Annotation annotation) {
+        if (annotations.size() < 256) {
+            rememberChange(annotations.size(),std::nullopt,annotation);
+            annotations.push_back(std::move(annotation));
+        }
+    }
+    void applyChange(const AnnotationChange& change,bool forward) {
+        const auto& from=forward?change.before:change.after;
+        const auto& to=forward?change.after:change.before;
+        if(from&&to&&change.index<annotations.size()) annotations[change.index]=*to;
+        else if(!from&&to&&change.index<=annotations.size()) annotations.insert(annotations.begin()+change.index,*to);
+        else if(from&&!to&&change.index<annotations.size()) annotations.erase(annotations.begin()+change.index);
+    }
     void undo() {
-        if (!annotations.empty()) { redoAnnotations.push_back(std::move(annotations.back())); annotations.pop_back(); } invalidate();
+        if (!undoChanges.empty()) {
+            auto change=std::move(undoChanges.back());undoChanges.pop_back();
+            applyChange(change,false);redoChanges.push_back(std::move(change));
+        } invalidate();
     }
     void redo() {
-        if (!redoAnnotations.empty()) { annotations.push_back(std::move(redoAnnotations.back())); redoAnnotations.pop_back(); } invalidate();
+        if (!redoChanges.empty()) {
+            auto change=std::move(redoChanges.back());redoChanges.pop_back();
+            applyChange(change,true);undoChanges.push_back(std::move(change));
+        } invalidate();
+    }
+    RECT textBounds(const Annotation& annotation)const {
+        if(annotation.tool!=Tool::Text || annotation.points.empty() || annotation.text.empty())return {};
+        if(!annotation.measuredTextKnown) {
+            const auto point=annotation.points.front();
+            Gdiplus::Graphics graphics(snapshot.dc);Gdiplus::Font font(L"Segoe UI",18*scale,Gdiplus::FontStyleRegular,Gdiplus::UnitPixel);
+            Gdiplus::StringFormat format;Gdiplus::RectF bounds;
+            const Gdiplus::RectF layout((float)point.x,(float)point.y,(float)std::max(1L,annotation.box.right-point.x),(float)std::max(1L,annotation.box.bottom-point.y));
+            if(graphics.MeasureString(annotation.text.c_str(),(int)annotation.text.size(),&font,layout,&format,&bounds)!=Gdiplus::Ok)return {};
+            annotation.measuredText={(LONG)std::floor(bounds.X-2*scale),(LONG)std::floor(bounds.Y-2*scale),
+                (LONG)std::ceil(bounds.X+bounds.Width+2*scale),(LONG)std::ceil(bounds.Y+bounds.Height+2*scale)};
+            annotation.measuredTextKnown=true;
+        }
+        RECT clipped{};IntersectRect(&clipped,&annotation.measuredText,&selection);return clipped;
+    }
+    int hitText(POINT point)const {
+        for(size_t i=annotations.size();i>0;--i)if(contains(textBounds(annotations[i-1]),point))return (int)i-1;
+        return -1;
     }
     void invalidate() { InvalidateRect(window, nullptr, FALSE); }
     void retireSurfaces() {
@@ -345,6 +391,7 @@ struct Overlay {
         return true;
     }
     void drawAnnotation(HDC dc, Gdiplus::Graphics& graphics, const Annotation& annotation) {
+        if(edit && editedAnnotation>=0 && editedAnnotation<(int)annotations.size() && &annotation==&annotations[editedAnnotation])return;
         if (annotation.points.empty()) return;
         Gdiplus::Pen pen(Gdiplus::Color(annotation.color), annotation.thickness);
         pen.SetStartCap(Gdiplus::LineCapRound); pen.SetEndCap(Gdiplus::LineCapRound); pen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -517,7 +564,6 @@ struct Overlay {
         if (edit) { cancelText(); return; }
         if (drag == Drag::Annotate) { drag = Drag::None; draft = {}; ReleaseCapture(); invalidate(); return; }
         if (tool != Tool::Select) { tool = Tool::Select; invalidate(); return; }
-        if (selected) { clearTranslation(); selected = false; drag = Drag::None; annotations.clear(); redoAnnotations.clear(); buttons.clear(); updateHover(); invalidate(); return; }
         close();
     }
     void save() {
@@ -590,6 +636,7 @@ struct Overlay {
     void cancelText() {
         if (!edit) return;
         HWND control = edit; edit = nullptr;
+        editedAnnotation=-1;
         imeComposing = false;
         SetWindowLongPtrW(control, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(originalEditProc));
         DestroyWindow(control); SetFocus(window); invalidate();
@@ -597,29 +644,46 @@ struct Overlay {
     void commitText() {
         if (!edit) return;
         const int length = std::min(GetWindowTextLengthW(edit), 4096);
-        if (length > 0 && annotations.size() < 256) {
-            Annotation annotation; annotation.tool = Tool::Text; annotation.points.push_back(down);
-            annotation.box = {down.x, down.y, selection.right, selection.bottom};
+        if (editedAnnotation>=0 || (length>0 && annotations.size()<256)) {
+            const int index=editedAnnotation;
+            Annotation annotation;
+            if(index>=0 && index<(int)annotations.size()) annotation=annotations[index];
+            else {annotation.tool=Tool::Text;annotation.points.push_back(textOrigin);annotation.box={textOrigin.x,textOrigin.y,selection.right,selection.bottom};}
             annotation.text.resize(static_cast<size_t>(length) + 1);
-            const int actual = GetWindowTextW(edit, annotation.text.data(), length + 1); annotation.text.resize(actual); annotation.color = color;
-            if (actual) addAnnotation(std::move(annotation));
+            const int actual = GetWindowTextW(edit, annotation.text.data(), length + 1); annotation.text.resize(actual); annotation.color=editColor;annotation.measuredTextKnown=false;
+            if(index>=0 && index<(int)annotations.size()) {
+                if(annotation.text!=annotations[index].text || annotation.color!=annotations[index].color) {
+                    rememberChange(index,annotations[index],actual?std::optional<Annotation>(annotation):std::nullopt);
+                    if(actual)annotations[index]=std::move(annotation);else annotations.erase(annotations.begin()+index);
+                }
+            } else if (actual) addAnnotation(std::move(annotation));
         }
         cancelText();
     }
-    void startText(POINT point) {
-        commitText(); down = point;
+    void startText(POINT point,int existing=-1) {
+        commitText();textOrigin=point;editColor=color;
         const int width = std::min<int>(static_cast<int>(300 * scale), selection.right - point.x);
         const int height = std::min<int>(static_cast<int>(90 * scale), selection.bottom - point.y);
-        if (width < 20 || height < 20 || annotations.size() >= 256) return;
+        if (width < 20 || height < 20 || (existing<0 && annotations.size()>=256)) return;
+        if(existing>=0 && existing<(int)annotations.size()) editColor=annotations[existing].color;
         if (!editFont) editFont = CreateFontW(-static_cast<int>(18 * scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         if (!editBrush) editBrush = CreateSolidBrush(RGB(26, 32, 43));
         edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL,
             point.x, point.y, width, height, window, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (!edit) return;
+        editedAnnotation=existing;
+        if(existing>=0 && existing<(int)annotations.size())SetWindowTextW(edit,annotations[existing].text.c_str());
         ++editGeneration;
         SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(editFont), TRUE); SendMessageW(edit, EM_SETLIMITTEXT, 4096, 0);
         originalEditProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(editProc))); SetFocus(edit);
+    }
+    void pointerDoubleClick() {
+        if(busy || !selected)return;
+        commitText();drag=Drag::None;
+        if(GetCapture()==window)ReleaseCapture();
+        const auto point=mouse();const int index=contains(selection,point)?hitText(point):-1;
+        if(index>=0)startText(annotations[index].points.front(),index);
     }
     void pointerDown() {
         if(!selected)updateHover();
@@ -632,6 +696,9 @@ struct Overlay {
         if (button >= 0) { perform(buttons[button].action); return; }
         commitText(); down = point; resizeEdges = hitEdge(point);
         if (selected && resizeEdges) { clearTranslation(); drag = Drag::Resize; dragOriginal = selection; }
+        else if(selected && contains(selection,point) && (draggedText=hitText(point))>=0) {
+            drag=Drag::MoveText;textDragBefore=annotations[draggedText];dragOriginal=textBounds(textDragBefore);
+        }
         else if (selected && contains(selection, point) && tool != Tool::Select) {
             if (tool == Tool::Text) { startText(point); return; }
             if (annotations.size() >= 256) return;
@@ -642,13 +709,21 @@ struct Overlay {
                 addAnnotation(std::move(draft)); draft = {}; drag = Drag::None; invalidate(); return;
             }
         } else if (selected && contains(selection, point)) { clearTranslation(); drag = Drag::Move; dragOriginal = selection; }
-        else { clearTranslation(); annotations.clear(); redoAnnotations.clear(); selected = true; selection = {point.x, point.y, point.x, point.y}; tool = Tool::Select; drag = Drag::Select; }
+        else if(selected) return;
+        else { clearTranslation(); annotations.clear(); undoChanges.clear(); redoChanges.clear(); selected = true; selection = {point.x, point.y, point.x, point.y}; tool = Tool::Select; drag = Drag::Select; }
         SetCapture(window); hover = -1; layoutToolbar(); invalidate();
     }
     void pointerMove() {
         cursor = mouse(); if (busy) return;
         const int newHover = hitButton(cursor); if (newHover != hover) { hover = newHover; invalidate(); }
         switch (drag) {
+        case Drag::MoveText: {
+            if(draggedText<0 || draggedText>=(int)annotations.size())break;
+            const int dx=std::clamp<int>(cursor.x-down.x,selection.left-dragOriginal.left,selection.right-dragOriginal.right);
+            const int dy=std::clamp<int>(cursor.y-down.y,selection.top-dragOriginal.top,selection.bottom-dragOriginal.bottom);
+            auto moved=textDragBefore;for(auto& point:moved.points){point.x+=dx;point.y+=dy;}
+            OffsetRect(&moved.box,dx,dy);moved.measuredTextKnown=false;annotations[draggedText]=std::move(moved);break;
+        }
         case Drag::Select: selection = pointRect(down, cursor); break;
         case Drag::Move: {
             const int dx = std::clamp<int>(cursor.x - down.x, -dragOriginal.left, snapshot.width - dragOriginal.right);
@@ -683,6 +758,10 @@ struct Overlay {
                 addAnnotation(std::move(draft));
             draft = Annotation{};
         }
+        if(completed==Drag::MoveText && draggedText>=0 && draggedText<(int)annotations.size()) {
+            if(!EqualRect(&annotations[draggedText].box,&textDragBefore.box))rememberChange(draggedText,textDragBefore,annotations[draggedText]);
+            draggedText=-1;
+        }
         if (completed == Drag::Select && std::abs(cursor.x - down.x) < 4 && std::abs(cursor.y - down.y) < 4 && validSize(hoverSelection)) selection = hoverSelection;
         selected = selection.right > selection.left && selection.bottom > selection.top; layoutToolbar(); invalidate();
     }
@@ -695,7 +774,9 @@ struct Overlay {
             else if (edges == 4 || edges == 8) cursorId = IDC_SIZENS;
             else if (edges == 5 || edges == 10) cursorId = IDC_SIZENWSE;
             else cursorId = IDC_SIZENESW;
-        } else if (selected && contains(selection, point) && tool == Tool::Select) cursorId = IDC_SIZEALL;
+        } else if(selected && contains(selection,point) && hitText(point)>=0)cursorId=IDC_SIZEALL;
+        else if (selected && contains(selection, point) && tool == Tool::Select) cursorId = IDC_SIZEALL;
+        else if(selected && !contains(selection,point))cursorId=IDC_ARROW;
         else if (tool == Tool::Text) cursorId = IDC_IBEAM;
         SetCursor(LoadCursorW(nullptr, cursorId));
     }
@@ -944,6 +1025,7 @@ LRESULT CALLBACK overlayProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: state->render(); return 0;
     case WM_LBUTTONDOWN: state->eventCursor(lparam); state->pointerDown(); return 0;
+    case WM_LBUTTONDBLCLK: state->eventCursor(lparam);state->pointerDoubleClick();return 0;
     case WM_MOUSEMOVE: state->eventCursor(lparam); state->pointerMove(); return 0;
     case WM_LBUTTONUP: state->eventCursor(lparam); state->pointerUp(); return 0;
     case WM_RBUTTONDOWN: if (!state->busy) state->back(); return 0;
@@ -954,9 +1036,10 @@ LRESULT CALLBACK overlayProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         return 0;
     case WM_CTLCOLOREDIT:
         SetBkColor(reinterpret_cast<HDC>(wparam), RGB(26, 32, 43));
-        SetTextColor(reinterpret_cast<HDC>(wparam), RGB((state->color >> 16) & 255, (state->color >> 8) & 255, state->color & 255));
+        SetTextColor(reinterpret_cast<HDC>(wparam), RGB((state->editColor >> 16) & 255, (state->editColor >> 8) & 255, state->editColor & 255));
         return reinterpret_cast<LRESULT>(state->editBrush);
     case WM_CAPTURECHANGED:
+        if(state->drag==Drag::MoveText && state->draggedText>=0 && state->draggedText<(int)state->annotations.size())state->annotations[state->draggedText]=state->textDragBefore;
         if (state->drag != Drag::None) { state->drag = Drag::None; state->draft = Annotation{}; state->layoutToolbar(); state->invalidate(); } return 0;
     case commitTextMessage: if (wparam == state->editGeneration) state->commitText(); return 0;
     case translationFinished: state->finishTranslation(static_cast<UINT_PTR>(wparam)); return 0;
@@ -1021,6 +1104,19 @@ bool copyBitmapToClipboard(HBITMAP bitmap) {
     DestroyWindow(clipboardOwner); if (memory) GlobalFree(memory); return success;
 }
 bool captureActive() { return activeWindow.load() != nullptr || scrollingCaptureActive(); }
+capture_detail::AnnotationInfo capture_detail::annotationInfo(){
+    AnnotationInfo result;auto state=image_tools_detail::windowState<Overlay>(activeWindow.load());
+    if(!state)return result;
+    result.count=state->annotations.size();result.editing=state->edit!=nullptr;
+    for(const auto& annotation:state->annotations)if(annotation.tool==Tool::Text){
+        if(!result.textCount && !annotation.points.empty()){
+            result.firstTextOrigin=annotation.points.front();result.firstTextOrigin.x+=state->screen.left;result.firstTextOrigin.y+=state->screen.top;
+            result.firstTextBounds=state->textBounds(annotation);OffsetRect(&result.firstTextBounds,state->screen.left,state->screen.top);
+        }
+        ++result.textCount;
+    }
+    return result;
+}
 capture_detail::HoverInfo capture_detail::hoverInfo(){
     HoverInfo result;auto state=image_tools_detail::windowState<Overlay>(activeWindow.load());
     if(!state||!state->snapshot.pixels)return result;
@@ -1062,7 +1158,7 @@ void beginCapture(HWND owner, CaptureCallback callback, RegionCallback recording
     if (Gdiplus::GdiplusStartup(&state->gdiplus, &startup, nullptr) != Gdiplus::Ok) { recover(); return; }
     static ATOM windowClass = [] {
         WNDCLASSEXW type{sizeof(type)}; type.hInstance = GetModuleHandleW(nullptr); type.lpfnWndProc = overlayProc;
-        type.lpszClassName = L"DeskEfficiencyCaptureOverlay"; type.hCursor = LoadCursorW(nullptr, IDC_CROSS); return RegisterClassExW(&type);
+        type.style=CS_DBLCLKS;type.lpszClassName = L"DeskEfficiencyCaptureOverlay"; type.hCursor = LoadCursorW(nullptr, IDC_CROSS); return RegisterClassExW(&type);
     }();
     if (!windowClass) { recover(); return; }
     HWND window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"DeskEfficiencyCaptureOverlay", L"截图 · 桌面提效", WS_POPUP,

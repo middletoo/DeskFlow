@@ -3,7 +3,7 @@
 Build signed Windows archives locally; signing keys stay in the certificate store.
 #>
 param(
-    [string]$Version='0.3.4.1',
+    [string]$Version='0.3.5.0',
     [string]$CertificateThumbprint='5E73D2B83E4733BB81072695B845044028283DA4',
     [string]$BuildRoot='',
     [string]$OutputDirectory='',
@@ -48,19 +48,19 @@ foreach($architecture in @('x64','x86','ARM64')){
     New-Item -ItemType Directory -Force -Path (Join-Path $docs 'images') | Out-Null
     foreach($name in @('USER_GUIDE.zh-CN.md','USER_GUIDE.en-US.md','DEVELOPMENT.md','DEVELOPMENT.en-US.md','PERFORMANCE.md','PERFORMANCE.en-US.md')){Copy-Item -LiteralPath (Join-Path $root "docs/$name") -Destination $docs}
     Copy-Item -LiteralPath (Join-Path $root 'docs/benchmarks') -Destination $docs -Recurse
-    foreach($name in @('files','clipboard','clipboard-preview','capture','capture-hover','ocr','translation','pin','scrolling','recording')){Copy-Item -LiteralPath (Join-Path $root "docs/images/$name.png") -Destination (Join-Path $docs 'images')}
+    foreach($name in @('files','clipboard','clipboard-preview','capture','capture-hover','ocr','translation','pin','scrolling','recording','installer')){Copy-Item -LiteralPath (Join-Path $root "docs/images/$name.png") -Destination (Join-Path $docs 'images')}
     @"
 DeskFlow $releaseVersion — Windows $architecture
 
 中文：完整解压后双击 DeskFlow.exe。默认快捷键：Alt+Q 文件，Alt+W 剪贴板，Alt+S 截图。
 请让 DeskIndex.exe 和 DeskOCR.exe 与主程序放在同一目录。无需另外安装 VC++ 运行库。
-本地 OCR 需要 MSIX 包身份：如需 OCR/原图翻译，请下载同架构 setup.zip，运行其中 Install-DeskFlow.cmd。
-便携版数据保存在当前用户 LocalAppData/DeskFlow，不写入下载文件夹。
+本地 OCR 需要 MSIX 包身份：如需 OCR/原图翻译，请下载同架构 setup.exe，按安装向导操作。
+默认便携版数据保存在当前用户 LocalAppData/DeskFlow；安装向导选定的数据目录也适用于便携版。
 
 English: Extract everything and run DeskFlow.exe. Keys: Alt+Q files, Alt+W history, Alt+S capture.
 Keep DeskIndex.exe and DeskOCR.exe beside the app. No separate VC++ runtime is required.
-For local OCR/image translation, download the matching setup.zip and run Install-DeskFlow.cmd.
-Portable data lives in the current user's LocalAppData/DeskFlow, outside the download folder.
+For local OCR/image translation, download the matching setup.exe and follow the installation wizard.
+Portable data defaults to LocalAppData/DeskFlow; a data folder chosen by the wizard also applies to portable builds.
 
 https://github.com/middletoo/DeskFlow/releases
 "@ | Set-Content -LiteralPath (Join-Path $portable 'START-HERE.txt') -Encoding utf8
@@ -69,24 +69,30 @@ https://github.com/middletoo/DeskFlow/releases
     $packageOutput=Join-Path $scratch "$architecture-msix"
     & (Join-Path $PSScriptRoot 'package.ps1') -SkipBuild -Architecture $architecture -BinaryDirectory $binaries -OutputDirectory $packageOutput -Version $Version -CertificateThumbprint $CertificateThumbprint
     $setup=Join-Path $scratch "$architecture-setup"
-    & (Join-Path $PSScriptRoot 'build-installer.ps1') -Architecture $architecture -BinaryDirectory $binaries -PackagePath (Join-Path $packageOutput "DeskFlow-$Version-$slug.msix") -CertificatePath (Join-Path $packageOutput 'DeskFlow-Development.cer') -OutputDirectory $setup -Version $Version
+    & (Join-Path $PSScriptRoot 'build-installer.ps1') -Architecture $architecture -BinaryDirectory $binaries -PackagePath (Join-Path $packageOutput "DeskFlow-$Version-$slug.msix") -CertificatePath (Join-Path $packageOutput 'DeskFlow-Development.cer') -CertificateThumbprint $CertificateThumbprint -OutputDirectory $setup -Version $Version
     & (Join-Path $PSScriptRoot '../tests/installer_tests.ps1') -BundleDirectory $setup
+    if($architecture -ne 'ARM64'){
+        $validationReceipt=Join-Path $scratch "$architecture-native-setup-validation.json"
+        $validated=Start-Process -FilePath (Join-Path $setup 'DeskSetup.exe') -WindowStyle Hidden -PassThru -Wait -ArgumentList @('--validate-payload','--receipt',('"'+$validationReceipt+'"'))
+        if($validated.ExitCode -ne 0 -or !(Get-Content -LiteralPath $validationReceipt -Raw | ConvertFrom-Json).ok){throw 'Native setup embedded-payload validation failed'}
+    }
+    Copy-Item -LiteralPath (Join-Path $setup 'DeskSetup.exe') -Destination (Join-Path $OutputDirectory "DeskFlow-$releaseVersion-windows-$slug-setup.exe") -Force
     @"
 DeskFlow $releaseVersion — Windows $architecture setup
 
-中文：完整解压后双击 Install-DeskFlow.cmd。初次安装可能请求 UAC，仅信任已知 DeskFlow 开发证书到 Trusted People。
-安装后从开始菜单启动，可使用本地 OCR 和原图翻译。更新沿用同一包家族的数据。
+中文：完整解压后双击 DeskSetup.exe。向导可选择数据文件夹；更新保留历史，更换位置复制数据并保留原目录。
+初次安装可能请求 UAC，仅信任已知 DeskFlow 开发证书到 Trusted People。安装后从开始菜单启动，可使用本地 OCR 和原图翻译。
 当前验证版使用开发者自签名证书，不是 Microsoft Store 正式签名版本。下载校验见 Releases 中的 SHA256SUMS.txt。
 
-English: Extract everything and run Install-DeskFlow.cmd. Initial installation may ask for UAC to trust the pinned development leaf in Trusted People.
-Launch from Start for local OCR/image translation. Updates retain package-family data.
+English: Extract everything and run DeskSetup.exe. Choose a data folder in the wizard; changing it copies data and retains the source.
+Initial installation may ask for UAC to trust the pinned development leaf in Trusted People. Launch from Start for local OCR/image translation.
 This validation release uses a self-signed development certificate, not Microsoft Store distribution signing. Check SHA256SUMS.txt from Releases.
 
 https://github.com/middletoo/DeskFlow/releases
 "@ | Set-Content -LiteralPath (Join-Path $setup 'START-HERE.txt') -Encoding utf8
     Compress-Archive -Path (Join-Path $setup '*') -DestinationPath (Join-Path $OutputDirectory "DeskFlow-$releaseVersion-windows-$slug-setup.zip") -Force
 }
-Get-ChildItem -LiteralPath $OutputDirectory -Filter '*.zip' -File | Sort-Object Name | ForEach-Object {
+Get-ChildItem -LiteralPath $OutputDirectory -File | Where-Object {$_.Extension -in @('.zip','.exe')} | Sort-Object Name | ForEach-Object {
     ((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$_.Name)
 } | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256SUMS.txt') -Encoding ascii
 Write-Output "Release archives: $OutputDirectory"

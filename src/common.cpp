@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "storage.hpp"
 #include <bcrypt.h>
 #include <wincrypt.h>
 #include <shlobj.h>
@@ -29,6 +30,10 @@ std::wstring wide(const std::string &value) {
     return out;
 }
 std::filesystem::path dataDirectory() {
+    if(auto configured=configuredDataDirectory()){
+        std::filesystem::create_directories(*configured);
+        return physicalDirectory(*configured);
+    }
     // Resolve the user's own storage; never use the project folder for live history.
     PWSTR path = nullptr;
     // Redirected Win32 writes may reside on another volume. Return the physical

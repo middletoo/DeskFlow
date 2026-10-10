@@ -31,10 +31,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production programs and isolated tests
         run: |
-          ./scripts/build.ps1 -Architecture '${{ matrix.architecture }}' -BuildDirectory build-ci -SkipTests -Targets DeskFlow,DeskIndex,DeskOCR,DeskTrust,history_tests,settings_tests,search_tests,index_fairness_tests,index_pacing_tests,metadata_migration_tests,translation_tests,host_tests
+          ./scripts/build.ps1 -Architecture '${{ matrix.architecture }}' -BuildDirectory build-ci -SkipTests -Targets DeskFlow,DeskIndex,DeskOCR,DeskTrust,DeskSetup,history_tests,settings_tests,storage_migration_tests,setup_wizard_tests,capture_tests,search_tests,index_fairness_tests,index_pacing_tests,metadata_migration_tests,translation_tests,host_tests
       - name: Run tests on the matching Windows architecture
         run: |
-          ctest --test-dir build-ci -C Release --output-on-failure -R '^(history|settings|search|index_root_fairness|index_background_cpu|metadata_readonly_migration|translation|ocr_identity_error|host_private_desktop)$'
+          ctest --test-dir build-ci -C Release --output-on-failure -R '^(history|settings|storage_migration|setup_wizard_private_desktop|capture_overlay|search|index_root_fairness|index_background_cpu|metadata_readonly_migration|translation|ocr_identity_error|host_private_desktop)$'
           if ($LASTEXITCODE -ne 0) { throw 'Architecture tests failed' }
       - name: Verify native application startup with synthetic data
         run: |

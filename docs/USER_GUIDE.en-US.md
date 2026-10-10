@@ -10,7 +10,13 @@ DeskFlow combines independent file search, persistent clipboard history, and cap
 
 Windows 10 version 2004 or later and Windows 11, with x64, x86 and ARM64 builds. ARM64 validation uses Windows 11 on Arm. Most Intel/AMD PCs use x64; 32-bit Windows uses x86; Windows on Arm uses ARM64.
 
-Download the matching architecture from [Releases](https://github.com/middletoo/DeskFlow/releases). Extract the portable archive and run `DeskFlow.exe`. For local OCR/image translation, extract the setup archive and run `Install-DeskFlow.cmd`. The first installation may ask for UAC to trust the pinned development certificate; no private key is distributed. Launch the installed app from Start. Closing the main window returns it to the tray; use the tray menu to exit completely. See [Development](DEVELOPMENT.en-US.md) for source builds. OCR also needs Windows language resources.
+Download the matching `setup.exe` from [Releases](https://github.com/middletoo/DeskFlow/releases). Open the wizard, click Next, keep the current data folder or choose a dedicated empty folder, then click Install. The final page offers launch and desktop-shortcut options. Alternatively, extract `setup.zip` and run `DeskSetup.exe` or `Install-DeskFlow.cmd`.
+
+![Choose your data folder](images/installer.png)
+
+The folder contains history databases, attachments, settings and the file index; another local drive is supported. Windows manages the MSIX application location. Changing the data folder closes the app, copies databases through SQLite snapshots and retains the source. Disk roots, network paths, unrelated nonempty folders and nested source/destination folders are rejected. Encrypted files require an EFS-capable destination. Run the wizard again to change location later; installed and portable builds share a location selected in the wizard.
+
+First installation may request UAC to trust the pinned development certificate; no private key is distributed. Launch from Start, close the main window to return to the tray, or use the tray menu to exit completely. Portable builds run from `DeskFlow.exe`; local OCR/image translation require an installed package and Windows language resources. See [Development](DEVELOPMENT.en-US.md) for source builds.
 
 | Function | Default hotkey |
 | --- | --- |
@@ -56,6 +62,10 @@ Defaults are 32 MiB per entry and a 5 GiB image-storage budget, configurable in 
 
 Press Alt+S. Hover to select a window or drag a region. Rectangle, ellipse, arrow, pen, text, mosaic and numbered annotations are available, with contextual color/width controls. The green check to the right of the red cross copies the screenshot.
 
+After confirming text, drag its visible area to move it, or double-click to edit it again. Canceling an edit retains the original. Text moves, edits and deletion support undo/redo.
+
+After selecting a region, clicking or dragging in the shaded area keeps that selection. Its edges can still be resized and the region moved. Press Esc or the red cross, then Alt+S to start a new capture.
+
 | Action | Shortcut |
 | --- | --- |
 | Copy / save | Enter / Ctrl+S |
@@ -74,6 +84,10 @@ Before the first left click, the outline follows the application beneath the poi
 ![OCR text panel](images/ocr.png)
 
 Press O in a selection. Windows OCR runs in an isolated on-demand process; Chinese/English resources come from the system. Long images use overlapping tiles with restored coordinates. Select, scroll and copy results. The capture panel also accepts an image file or Ctrl+V image import.
+
+Small images use bounded enlargement, transparent backgrounds are composited, and dark/low-contrast images receive targeted preprocessing. Wide images use overlapping two-dimensional tiles rather than shrinking all text. English-only regions can use an English model; matched native CJK results are retained when enhancement loses characters.
+
+Very small CJK glyphs, blurry images, unusual fonts and complex backgrounds can still be misread. Use a clear, compact region at its original resolution and check the text before copying or translating.
 
 Missing package identity/language resources or poor image quality produce an explicit error; retry with a clear text region.
 

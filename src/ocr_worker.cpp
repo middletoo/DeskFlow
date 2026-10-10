@@ -10,6 +10,7 @@
 namespace desk::ocr_detail {
 struct Word { std::wstring text; float x = 0, width = 0, height = 0; };
 struct Tile { uint32_t y = 0, height = 0; double ownerStart = 0, ownerEnd = 0; };
+struct ImageTile {uint32_t x{},y{},width{},height{};double left{},top{},right{},bottom{};};
 std::vector<Tile> verticalTiles(uint32_t height, uint32_t maximum) {
     if (!height || !maximum) throw std::invalid_argument("OCR tile dimensions must be nonzero.");
     const uint32_t overlap = std::min(128u,maximum / 4);
@@ -22,6 +23,18 @@ std::vector<Tile> verticalTiles(uint32_t height, uint32_t maximum) {
         if (result.size() > 64) throw std::invalid_argument("OCR tile count exceeded the task budget.");
         if (final) break;
     }
+    return result;
+}
+std::vector<ImageTile> imageTiles(uint32_t width,uint32_t height,uint32_t maximum){
+    if(!width||!height||!maximum)throw std::invalid_argument("OCR image dimensions must be nonzero");
+    const auto practicalMaximum=std::min(maximum,2400u);
+    const auto tileWidth=std::min(width,practicalMaximum);
+    const auto tileHeight=std::min(practicalMaximum,std::max(1u,(8u*1024u*1024u)/tileWidth));
+    const auto columns=verticalTiles(width,tileWidth),rows=verticalTiles(height,tileHeight);
+    if(columns.size()*rows.size()>64)throw std::invalid_argument("OCR tile count exceeded the task budget");
+    std::vector<ImageTile> result;
+    for(const auto& row:rows)for(const auto& column:columns)
+        result.push_back({column.y,row.y,column.height,row.height,column.ownerStart,row.ownerStart,column.ownerEnd,row.ownerEnd});
     return result;
 }
 namespace {
@@ -166,66 +179,171 @@ json recognize(const std::filesystem::path& image) {
         return failure("image_invalid","image_dimensions",E_INVALIDARG);
     const auto maximum = OcrEngine::MaxImageDimension();
     if (!maximum) return failure("engine_failed","engine_initialization",E_UNEXPECTED);
-    // Height never forces small text to shrink. Tall images are cropped in the
-    // scaled coordinate system before each engine call.
-    const double factor = std::min(1.0,static_cast<double>(maximum) / width);
-    const auto scaledWidth = std::max(1u,static_cast<uint32_t>(std::floor(width * factor)));
-    const auto scaledHeight = std::max(1u,static_cast<uint32_t>(std::floor(height * factor)));
-    // At most 8 Mi pixels / 32 MiB of software-bitmap storage per tile. The
-    // parent also enforces its existing 512 MiB job and 30 second deadline.
-    const uint32_t tileHeight = std::min(maximum,std::max(1u,(8u * 1024u * 1024u) / scaledWidth));
-    const auto tiles = desk::ocr_detail::verticalTiles(scaledHeight,tileHeight);
-    const double scaleX = static_cast<double>(width) / scaledWidth;
-    const double scaleY = static_cast<double>(height) / scaledHeight;
-    struct PositionedLine { std::string text; double x, y, width, height; };
-    std::vector<PositionedLine> positioned;
-    size_t blankTiles = 0;
-    for (const auto& tile : tiles) {
-        if (GetTickCount64() - started > 25000) return failure("engine_failed","recognize",HRESULT_FROM_WIN32(ERROR_TIMEOUT));
-        BitmapTransform transform;
-        transform.ScaledWidth(scaledWidth); transform.ScaledHeight(scaledHeight);
-        transform.InterpolationMode(BitmapInterpolationMode::Fant);
-        transform.Bounds(BitmapBounds{0,tile.y,scaledWidth,tile.height});
-        ScopedBitmap bitmap;
-        try {
-            bitmap.value = decoder.GetSoftwareBitmapAsync(BitmapPixelFormat::Bgra8,BitmapAlphaMode::Ignore,
-                transform,ExifOrientationMode::IgnoreExifOrientation,ColorManagementMode::DoNotColorManage).get();
-        } catch (const hresult_error& error) { return failure("image_invalid","transform_image",error.code()); }
-        if (uniformBitmap(bitmap.value)) { ++blankTiles; continue; }
-        winrt::Windows::Media::Ocr::OcrResult recognized{nullptr};
-        try { recognized = engine.RecognizeAsync(bitmap.value).get(); }
-        catch (const hresult_error& error) { return failure("engine_failed","recognize",error.code()); }
-        for (const auto& line : recognized.Lines()) {
-            double left = std::numeric_limits<double>::max(), top = left, right = 0, bottom = 0;
-            std::vector<desk::ocr_detail::Word> words;
-            for (const auto& word : line.Words()) {
-                const auto box = word.BoundingRect();
-                words.push_back({std::wstring(word.Text()),box.X,box.Width,box.Height});
-                left = std::min(left,static_cast<double>(box.X)); top = std::min(top,static_cast<double>(box.Y));
-                right = std::max(right,static_cast<double>(box.X + box.Width)); bottom = std::max(bottom,static_cast<double>(box.Y + box.Height));
+    // Preserve wide-image detail and bound enlargement of small screenshots.
+    const auto area=static_cast<uint64_t>(width)*height;
+    struct PositionedWord {std::wstring text;double x,y,width,height;};
+    std::vector<PositionedWord> positioned;
+    size_t blankTiles=0,normalizedTiles=0,englishTiles=0;
+    OcrEngine english{nullptr};
+    auto normalize=[](const SoftwareBitmap& bitmap,bool enhance=true){
+        auto locked=bitmap.LockBuffer(BitmapBufferAccessMode::ReadWrite);
+        auto reference=locked.CreateReference();const auto plane=locked.GetPlaneDescription(0);
+        auto* data=reference.data();
+        if(!data||plane.StartIndex<0||plane.Stride<plane.Width*4||plane.Width<=0||plane.Height<=0||
+           static_cast<uint64_t>(plane.StartIndex)+static_cast<uint64_t>(plane.Height-1)*plane.Stride+static_cast<uint64_t>(plane.Width)*4>reference.Capacity()){
+            reference.Close();locked.Close();return false;
+        }
+        uint32_t low=255,high=0;uint64_t dark=0,pixels=static_cast<uint64_t>(plane.Width)*plane.Height;bool alpha=false;
+        for(int y=0;y<plane.Height;++y)for(int x=0;x<plane.Width;++x){
+            auto* pixel=data+plane.StartIndex+static_cast<ptrdiff_t>(y)*plane.Stride+x*4;
+            if(pixel[3]!=255){
+                const auto extra=255-pixel[3];alpha=true;
+                for(int channel=0;channel<3;++channel)pixel[channel]=static_cast<uint8_t>(std::min(255u,static_cast<unsigned>(pixel[channel])+extra));
+                pixel[3]=255;
             }
-            if (left == std::numeric_limits<double>::max()) continue;
-            const double center = tile.y + (top + bottom) / 2;
-            if (center < tile.ownerStart || center >= tile.ownerEnd) continue;
-            const auto lineText = to_string(winrt::hstring(desk::ocr_detail::joinWords(words)));
-            if (lineText.empty()) continue;
-            left = std::clamp(left * scaleX,0.0,static_cast<double>(width)); top = std::clamp((tile.y + top) * scaleY,0.0,static_cast<double>(height));
-            right = std::clamp(right * scaleX,left,static_cast<double>(width)); bottom = std::clamp((tile.y + bottom) * scaleY,top,static_cast<double>(height));
-            if (positioned.size() >= 10000) return failure("output_limit");
-            positioned.push_back({lineText,left,top,right - left,bottom - top});
+            const unsigned light=(pixel[2]*77+pixel[1]*150+pixel[0]*29)>>8;
+            low=std::min(low,light);high=std::max(high,light);if(light<96)++dark;
+        }
+        const bool invert=enhance&&dark*100>pixels*65;
+        const bool stretch=enhance&&high>low+2&&high-low<80;
+        if(invert||stretch)for(int y=0;y<plane.Height;++y)for(int x=0;x<plane.Width;++x){
+            auto* pixel=data+plane.StartIndex+static_cast<ptrdiff_t>(y)*plane.Stride+x*4;
+            int light=(pixel[2]*77+pixel[1]*150+pixel[0]*29)>>8;
+            if(stretch)light=std::clamp((light-static_cast<int>(low))*255/static_cast<int>(high-low),0,255);
+            if(invert)light=255-light;
+            pixel[0]=pixel[1]=pixel[2]=static_cast<uint8_t>(light);pixel[3]=255;
+        }
+        reference.Close();locked.Close();return alpha||invert||stretch;
+    };
+    Windows::Media::Ocr::OcrResult original{nullptr};
+    std::vector<float> nativeHeights;
+    if(area<=2ULL*1024*1024&&width<=maximum&&height<=maximum){
+        try{
+            BitmapTransform nativeTransform;ScopedBitmap native;
+            native.value=decoder.GetSoftwareBitmapAsync(BitmapPixelFormat::Bgra8,BitmapAlphaMode::Premultiplied,
+                nativeTransform,ExifOrientationMode::IgnoreExifOrientation,ColorManagementMode::DoNotColorManage).get();
+            normalize(native.value,false);
+            if(!uniformBitmap(native.value)){
+                original=engine.RecognizeAsync(native.value).get();
+                for(const auto& line:original.Lines())for(const auto& word:line.Words())nativeHeights.push_back(word.BoundingRect().Height);
+            }
+        }catch(const hresult_error&){}
+    }
+    std::sort(nativeHeights.begin(),nativeHeights.end());
+    const bool readableSize=!nativeHeights.empty()&&nativeHeights[nativeHeights.size()/2]>=20;
+    const double factor=readableSize?1.0:area<=512ULL*1024?4.0:area<=2ULL*1024*1024?2.0:1.0;
+    const auto scaledWidth=static_cast<uint32_t>(width*factor),scaledHeight=static_cast<uint32_t>(height*factor);
+    const auto tiles=desk::ocr_detail::imageTiles(scaledWidth,scaledHeight,maximum);
+    const double scaleX=static_cast<double>(width)/scaledWidth,scaleY=static_cast<double>(height)/scaledHeight;
+    for(const auto& tile:tiles){
+        if(GetTickCount64()-started>25000)return failure("engine_failed","recognize",HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+        BitmapTransform transform;transform.ScaledWidth(scaledWidth);transform.ScaledHeight(scaledHeight);
+        transform.InterpolationMode(BitmapInterpolationMode::Cubic);transform.Bounds(BitmapBounds{tile.x,tile.y,tile.width,tile.height});
+        ScopedBitmap bitmap;
+        try{
+            bitmap.value=decoder.GetSoftwareBitmapAsync(BitmapPixelFormat::Bgra8,BitmapAlphaMode::Premultiplied,
+                transform,ExifOrientationMode::IgnoreExifOrientation,ColorManagementMode::DoNotColorManage).get();
+            if(normalize(bitmap.value))++normalizedTiles;
+        }catch(const hresult_error& error){return failure("image_invalid","transform_image",error.code());}
+        if(uniformBitmap(bitmap.value)){++blankTiles;continue;}
+        winrt::Windows::Media::Ocr::OcrResult recognized{nullptr};
+        try{recognized=engine.RecognizeAsync(bitmap.value).get();}
+        catch(const hresult_error& error){return failure("engine_failed","recognize",error.code());}
+        bool hasHan=false,hasLatin=false;
+        for(const auto& line:recognized.Lines())for(const auto& word:line.Words()){
+            const auto wordText=word.Text();
+            for(auto character:std::wstring_view(wordText)){
+                if((character>=0x3400&&character<=0x9fff)||(character>=0xf900&&character<=0xfaff))hasHan=true;
+                if((character>=L'a'&&character<=L'z')||(character>=L'A'&&character<=L'Z'))hasLatin=true;
+            }
+        }
+        if(!hasHan&&(hasLatin||recognized.Lines().Size()==0)&&std::wstring_view(engine.RecognizerLanguage().LanguageTag()).starts_with(L"zh")){
+            if(!english)for(const auto& language:available)if(std::wstring_view(language.LanguageTag()).starts_with(L"en")){
+                english=OcrEngine::TryCreateFromLanguage(language);if(english)break;
+            }
+            if(english&&GetTickCount64()-started<22000){
+                try{
+                    auto alternative=english.RecognizeAsync(bitmap.value).get();
+                    if(alternative.Lines().Size()){recognized=alternative;++englishTiles;}
+                }catch(const hresult_error&){}
+            }
+        }
+        for(const auto& line:recognized.Lines())for(const auto& word:line.Words()){
+            const auto box=word.BoundingRect();const double centerX=tile.x+box.X+box.Width/2,centerY=tile.y+box.Y+box.Height/2;
+            if(centerX<tile.left||centerX>=tile.right||centerY<tile.top||centerY>=tile.bottom)continue;
+            const auto text=std::wstring(word.Text());if(text.empty())continue;
+            const double x=std::clamp((tile.x+box.X)*scaleX,0.0,static_cast<double>(width));
+            const double y=std::clamp((tile.y+box.Y)*scaleY,0.0,static_cast<double>(height));
+            if(positioned.size()>=50000)return failure("output_limit");
+            positioned.push_back({text,x,y,std::min(box.Width*scaleX,width-x),std::min(box.Height*scaleY,height-y)});
         }
     }
-    std::stable_sort(positioned.begin(),positioned.end(),[](const auto& left,const auto& right) { return left.y != right.y ? left.y < right.y : left.x < right.x; });
-    json lines = json::array();
-    std::string text;
-    for (const auto& line : positioned) {
+    // Keep native CJK results when enlargement loses characters. Match the
+    // same visual line before replacing it; never append a second copy.
+    if(original && factor>1.0 && GetTickCount64()-started<20000){
+      try {
+        auto hanCount=[](const auto& words){size_t count=0;for(const auto& word:words)for(auto character:word.text)
+            if((character>=0x3400&&character<=0x9fff)||(character>=0xf900&&character<=0xfaff))++count;return count;};
+        for(const auto& line:original.Lines()){
+            std::vector<PositionedWord> candidate;double left=width,top=height,right=0,bottom=0;
+            for(const auto& word:line.Words()){
+                const auto box=word.BoundingRect();candidate.push_back({std::wstring(word.Text()),box.X,box.Y,box.Width,box.Height});
+                left=std::min(left,(double)box.X);top=std::min(top,(double)box.Y);right=std::max(right,(double)(box.X+box.Width));bottom=std::max(bottom,(double)(box.Y+box.Height));
+            }
+            if(!hanCount(candidate))continue;
+            const double middle=(top+bottom)/2;
+            std::vector<PositionedWord> existing;
+            auto matches=[&](const auto& word){return std::abs(word.y+word.height/2-middle)<std::max(word.height,bottom-top)*1.5&&word.x<right+4&&word.x+word.width>left-4;};
+            for(const auto& word:positioned)if(matches(word))existing.push_back(word);
+            if(!existing.empty()&&hanCount(existing)>0&&hanCount(candidate)>=hanCount(existing)){
+                positioned.erase(std::remove_if(positioned.begin(),positioned.end(),matches),positioned.end());
+                positioned.insert(positioned.end(),candidate.begin(),candidate.end());
+            }
+        }
+      }catch(const hresult_error&){} // An optional refinement never discards the base result.
+    }
+    std::stable_sort(positioned.begin(),positioned.end(),[](const auto& a,const auto& b){
+        const auto ac=a.y+a.height/2,bc=b.y+b.height/2;return ac!=bc?ac<bc:a.x<b.x;
+    });
+    struct Band {std::vector<PositionedWord> words;double center{},height{};};
+    std::vector<Band> bands;
+    for(auto& word:positioned){
+        const double center=word.y+word.height/2;
+        if(bands.empty()||std::abs(center-bands.back().center)>std::max(word.height,bands.back().height)*.55)
+            bands.push_back({{},center,word.height});
+        auto& band=bands.back();band.height=std::max(band.height,word.height);
+        band.words.push_back(std::move(word));
+    }
+    struct PositionedLine {std::string text;double x,y,width,height;};
+    std::vector<PositionedLine> output;
+    for(auto& band:bands){
+        std::stable_sort(band.words.begin(),band.words.end(),[](const auto& a,const auto& b){return a.x<b.x;});
+        std::vector<desk::ocr_detail::Word> words;double left=0,top=0,right=0,bottom=0;
+        auto flush=[&]{
+            if(words.empty())return;
+            output.push_back({to_string(winrt::hstring(desk::ocr_detail::joinWords(words))),left,top,right-left,bottom-top});words.clear();
+        };
+        for(const auto& word:band.words){
+            if(!words.empty()&&word.x-right>std::max(word.height,bottom-top)*2.4)flush();
+            if(words.empty()){left=word.x;top=word.y;right=word.x+word.width;bottom=word.y+word.height;}
+            else{top=std::min(top,word.y);right=std::max(right,word.x+word.width);bottom=std::max(bottom,word.y+word.height);}
+            words.push_back({word.text,(float)word.x,(float)word.width,(float)word.height});
+        }
+        flush();
+    }
+    std::stable_sort(output.begin(),output.end(),[](const auto& a,const auto& b){return a.y!=b.y?a.y<b.y:a.x<b.x;});
+    json lines=json::array();std::string text;
+    for(const auto& line:output){
+        if(lines.size()>=10000)return failure("output_limit");
+        if(line.text.empty())continue;
         lines.push_back({{"text",line.text},{"x",line.x},{"y",line.y},{"width",line.width},{"height",line.height}});
-        if (!text.empty()) text += '\n'; text += line.text;
+        if(!text.empty())text+='\n';text+=line.text;
     }
     stream.Close();
     return json{{"version",1},{"ok",true},{"width",width},{"height",height},{"text",text},{"lines",std::move(lines)},
-        {"language",to_string(engine.RecognizerLanguage().LanguageTag())},{"scaled",factor < 1.0},
-        {"tileCount",tiles.size()},{"blankTiles",blankTiles},{"scaledWidth",scaledWidth},{"scaledHeight",scaledHeight}};
+        {"language",to_string(engine.RecognizerLanguage().LanguageTag())},{"scaled",factor!=1.0},{"upscaled",factor>1.0},
+        {"tileCount",tiles.size()},{"blankTiles",blankTiles},{"normalizedTiles",normalizedTiles},{"englishTiles",englishTiles},
+        {"scaledWidth",scaledWidth},{"scaledHeight",scaledHeight}};
 }
 }
 int wmain(int argc, wchar_t** argv) {

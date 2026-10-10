@@ -21,9 +21,13 @@ Supports Windows 10 2004+ and Windows 11, with **x64, x86 and ARM64** builds. Mo
 
 1. Download your architecture from [Releases](https://github.com/middletoo/DeskFlow/releases).
 2. For basic features, extract `portable.zip` and run `DeskFlow.exe`, keeping its worker programs beside it.
-3. For local OCR and image translation, extract `setup.zip`, run `Install-DeskFlow.cmd`, then launch from Start.
+3. Recommended: download `setup.exe`, open the installation wizard and choose a data folder. Launch from Start for local OCR and image translation. The same wizard is also included in `setup.zip`.
 
 No separate VC++ runtime is required. Local OCR needs MSIX identity and Windows recognition languages. First installation may display Windows UAC; the current installer uses a pinned self-signed development certificate. Verify downloads with `SHA256SUMS.txt`.
+
+![Installation wizard: choose a data folder](docs/images/installer.png)
+
+Keep databases, history attachments, settings and the index in a dedicated folder on another local drive. Changing location copies existing data and retains the source; unrelated nonempty destinations are rejected.
 
 ## Quick start
 
@@ -63,6 +67,8 @@ Click for a floating preview with selectable, scrollable text or bounded image t
 
 A white grouped toolbar has a red cancel cross and green copy check. Shapes, arrows, text, pen, mosaic and numbered annotations are available, with keyboard undo and redo.
 
+After confirming text, drag it to move or double-click to edit; changes support undo. Once a region is selected, shaded-area clicks preserve it. Use Esc or the cross, then Alt+S for a new capture.
+
 ![Window snapping and pixel information](docs/images/capture-hover.png)
 
 Before the first left click, the outline follows the application beneath the pointer. The magnifier updates physical pixel coordinates and HEX color; Ctrl+C copies the color.
@@ -72,6 +78,8 @@ Before the first left click, the outline follows the application beneath the poi
 ![Local OCR](docs/images/ocr.png)
 
 Press **O** in a selection to recognize text, then select and copy results. Windows OCR runs in an isolated process on demand, with tiled recognition for long images.
+
+Bounded enlargement, dark/low-contrast preprocessing and wide-image tiling help preserve detail. Very small CJK glyphs, blurry images and unusual fonts can still be misread; check results before copying or translating.
 
 ![Image translation](docs/images/translation.png)
 

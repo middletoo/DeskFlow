@@ -31,5 +31,7 @@ namespace capture_detail {
 // UI-thread diagnostic view; coordinates use physical virtual-desktop pixels.
 struct HoverInfo {RECT region{};POINT pixel{};DWORD rgb=0;bool selected=false;};
 HoverInfo hoverInfo();
+struct AnnotationInfo {size_t count{},textCount{};bool editing{};POINT firstTextOrigin{};RECT firstTextBounds{};};
+AnnotationInfo annotationInfo();
 }
 }

@@ -21,17 +21,17 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 自行开发时，生成并检查证书后，在自己的开发设备确认信任该已知叶证书到 Trusted People，再注册包。
 
 ```powershell
-pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.4.1
+pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.5.0
 # 检查证书后，在管理员 PowerShell 中执行：
 Import-Certificate -FilePath artifacts/msix/DeskFlow-Development.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.4.1-x64.msix
+Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.5.0-x64.msix
 ```
 
 不要提交 PFX/私钥、个人设置或生成的信任材料。
 
 ## 维护者发布构建
 
-`scripts/build-release.ps1` 构建三种架构，在本机证书库签名，校验固定安装器，并生成便携/安装压缩包和 SHA256 校验表。重新编译的辅助程序需审核并固定摘要后才能分发，不上传私钥。
+`scripts/build-release.ps1` 构建三种架构，在本机证书库签名，校验固定安装器，并生成独立安装 EXE、便携/安装压缩包和 SHA256 校验表。安装 EXE 内嵌已签名的 MSIX、公开证书、固定信任辅助程序和安装脚本；`--validate-payload` 可只验证内嵌内容，不安装或改变信任。重新编译的信任辅助程序需审核并固定摘要后才能分发，不上传私钥。
 
 Windows 工作流在 x64/x86 Windows 和 Windows 11 Arm 运行器执行编译及隔离测试；CI 产物未签名，Releases 中的签名压缩包在本机组装。
 
@@ -55,5 +55,6 @@ ctest --test-dir build -C Release --output-on-failure
 | `capture.cpp`, `image_tools.cpp` | 选区、贴图与长图 |
 | `ocr_worker.cpp`, `translation.cpp` | 独立 OCR 与翻译请求 |
 | `recording.cpp`, `system_audio.cpp` | 流式媒体与播放端点声音回环 |
+| `setup.cpp`, `storage.cpp` | 原生安装向导、数据库快照迁移与存储位置 |
 
 WASAPI 回环读取默认播放端点，使用共享模式，不打开麦克风。实现依据微软[回环录制](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording)与 [AAC 编码器](https://learn.microsoft.com/en-us/windows/win32/medfound/aac-encoder)文档。

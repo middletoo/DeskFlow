@@ -156,6 +156,14 @@ void ocrTileOwnership() {
         require(owners == 1,"Every boundary line center must have exactly one owner");
     }
     require(desk::ocr_detail::verticalTiles(240,10000).size() == 1,"Normal image remains one OCR request");
+    const auto grid=desk::ocr_detail::imageTiles(12000,2800,2600);
+    require(grid.size()>1&&grid.size()<=64,"Wide OCR images must use bounded two-dimensional tiles");
+    for(const auto& tile:grid)require(tile.width<=2600&&tile.height<=2600&&
+        static_cast<uint64_t>(tile.width)*tile.height<=8ULL*1024*1024,"OCR tiles must obey engine and pixel budgets");
+    for(double x:{0.5,2535.99,2536.0,11999.5})for(double y:{0.5,2535.99,2536.0,2799.5}){
+        int owners=0;for(const auto& tile:grid)if(x>=tile.left&&x<tile.right&&y>=tile.top&&y<tile.bottom)++owners;
+        require(owners==1,"Wide/tall OCR ownership must cover each boundary point exactly once");
+    }
     rejects([] { desk::ocr_detail::verticalTiles(30000,128); },"Tile count must have a finite resource budget");
 }
 void overlay() {

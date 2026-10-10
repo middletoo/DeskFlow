@@ -1,10 +1,8 @@
 @echo off
 setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-DeskFlow.ps1" -BundleDirectory "%~dp0."
-if errorlevel 1 (
-  echo Installation failed or Windows administrator confirmation was cancelled.
+if not exist "%~dp0DeskSetup.exe" (
+  echo DeskSetup.exe is missing. Extract the complete setup archive.
   pause
   exit /b 1
 )
-echo Installation finished. DeskFlow can now be opened from Start.
-pause
+start "" "%~dp0DeskSetup.exe" %*
