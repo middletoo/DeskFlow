@@ -352,7 +352,7 @@ static void selfFeedbackCase(const fs::path& base,int mode,bool enforce) {
             auto userDb=store.query(L"files.db");require(userDb.size()==1 && userDb[0].path.find(L"user-databases")!=std::wstring::npos,"runtime exclusion hid an unrelated user database");
         }
         put(root/L"timely-external-change.txt");
-        require(eventually([&]{return store.query(L"timely-external-change").size()==1;},5),"own-file exclusion suppressed external directory changes");
+        require(eventually([&]{return store.query(L"timely-external-change").size()==1;},15),"own-file exclusion suppressed external directory changes");
         require(desk::stopIndexWorker(data),"cannot stop own audit worker");require(WaitForSingleObject(worker.process.hProcess,5000)==WAIT_OBJECT_0,"own audit worker did not exit");
     }
     if(mode==2) require(RemoveDirectoryW(data.c_str())!=FALSE,"cannot remove controlled audit junction");

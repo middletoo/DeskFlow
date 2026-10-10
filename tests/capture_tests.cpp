@@ -175,6 +175,10 @@ void overlayTests() {
     check(seed != nullptr, "test pattern window creation");
     if (!seed) return;
     ShowWindow(seed, SW_SHOW); UpdateWindow(seed); DwmFlush();
+    HDC desktop=GetDC(nullptr);
+    const auto firstPixel=GetPixel(desktop,100,100),secondPixel=GetPixel(desktop,108,100);
+    ReleaseDC(nullptr,desktop);
+    const auto hexColor=[](COLORREF value){return (DWORD)(GetRValue(value)<<16|GetGValue(value)<<8|GetBValue(value));};
     HBITMAP output{}; std::wstring action;
     desk::beginCapture(nullptr, [&](HBITMAP bitmap, const std::wstring& name) { output = bitmap; action = name; });
     HWND overlay = FindWindowW(L"DeskEfficiencyCaptureOverlay", nullptr);
@@ -187,8 +191,14 @@ void overlayTests() {
         UpdateWindow(overlay);
         hoverAt(overlay,{108,100});
         const auto movedHover=desk::capture_detail::hoverInfo();
-        check(movedHover.pixel.x==108&&movedHover.pixel.y==100&&movedHover.rgb!=firstHover.rgb,
-              "moving within one window updates physical pixel coordinates and original RGB");
+        check(movedHover.pixel.x==108&&movedHover.pixel.y==100,
+              "moving within one window updates physical pixel coordinates");
+        if(firstPixel!=CLR_INVALID&&secondPixel!=CLR_INVALID){
+            check(firstHover.rgb==hexColor(firstPixel)&&movedHover.rgb==hexColor(secondPixel),
+                  "hover RGB matches both original desktop pixels");
+            if(firstPixel!=secondPixel)check(movedHover.rgb!=firstHover.rgb,"different source pixels update the displayed color");
+            else std::cout<<"SKIP: contrast assertion; the cloud desktop does not expose the synthetic checker pattern\n";
+        }
         check(GetUpdateRect(overlay,nullptr,FALSE)!=FALSE,"same-window pointer movement repaints the pixel information");
         HWND other=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,type.lpszClassName,L"Second synthetic application",WS_POPUP,480,80,300,240,nullptr,nullptr,type.hInstance,nullptr);
         ShowWindow(other,SW_SHOWNOACTIVATE);UpdateWindow(other);
