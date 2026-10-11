@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DeskFlow VERSION 0.3.5 LANGUAGES C CXX)
+project(DeskFlow VERSION 0.3.6 LANGUAGES C CXX)
 enable_language(RC)
 # Resolve C++/WinRT from the installed SDK instead of a developer drive path.
 get_filename_component(DESKFLOW_KITS_ROOT "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)

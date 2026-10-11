@@ -3,7 +3,7 @@
 Build signed Windows archives locally; signing keys stay in the certificate store.
 #>
 param(
-    [string]$Version='0.3.5.0',
+    [string]$Version='0.3.6.0',
     [string]$CertificateThumbprint='5E73D2B83E4733BB81072695B845044028283DA4',
     [string]$BuildRoot='',
     [string]$OutputDirectory='',

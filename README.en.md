@@ -49,6 +49,8 @@ All screenshots use synthetic examples, excluding personal files and real clipbo
 
 ![File search](docs/images/files.png)
 
+The lower-left counter shows searchable indexed files and folders. Initial indexing reports record reading, path construction, directory/hardlink reconciliation and elapsed time; the reading stage estimates its own remaining time from measured progress. Readiness is shown after coverage checks, and incomplete or limited empty results are labeled. Names are built first, metadata is filled through directory enumeration, and interrupted builds resume saved progress.
+
 Name, directory, size and modification time are visible by default; folder sizes remain empty. Double-click a name to reveal a file or its directory to copy the full path. Global sorting, incremental scrolling, multi-selection, drag-out, Windows context menus, filters and export are available.
 
 ### Clipboard history and floating previews

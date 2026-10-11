@@ -18,7 +18,7 @@ param(
     [string]$BinaryDirectory = '',
     [string]$OutputDirectory = '',
     [string]$Publisher = 'CN=DeskFlow Development',
-    [string]$Version = '0.3.5.0',
+    [string]$Version = '0.3.6.0',
     [ValidateSet('x64','x86','ARM64')][string]$Architecture = 'x64',
     [string]$PfxPath = '',
     [string]$CertificateThumbprint = '',

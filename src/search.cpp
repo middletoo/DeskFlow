@@ -247,6 +247,11 @@ struct Statement {
     }
     void run() { while (row()) {} }
 };
+struct StatementUse {
+    Statement& statement;
+    explicit StatementUse(Statement& value):statement(value){sqlite3_reset(statement.value);sqlite3_clear_bindings(statement.value);}
+    ~StatementUse(){sqlite3_reset(statement.value);sqlite3_clear_bindings(statement.value);}
+};
 
 void execute(sqlite3* db, const char* sql) {
     char* error = nullptr;
@@ -317,7 +322,8 @@ struct Database {
         ensureColumn("search_roots","enum_cursor","INTEGER NOT NULL DEFAULT 0");
         ensureColumn("search_roots","material_cursor","INTEGER");
         ensureColumn("search_roots","build_stamp","INTEGER NOT NULL DEFAULT 0");
-        ensureColumn("search_roots","initial_usn","INTEGER NOT NULL DEFAULT 0");
+            ensureColumn("search_roots","initial_usn","INTEGER NOT NULL DEFAULT 0");
+            ensureColumn("search_roots","unresolved_nodes","INTEGER NOT NULL DEFAULT 0");
         ensureColumn("scan_jobs","dirty","INTEGER NOT NULL DEFAULT 0");
         if(ensureColumn("files","short_ready","INTEGER NOT NULL DEFAULT 0")) execute(value,"UPDATE search_meta SET value='0' WHERE key IN('short_complete','short_cursor')");
         ensureColumn("files","type_key","TEXT NOT NULL DEFAULT ''");
@@ -358,16 +364,23 @@ void meta(sqlite3* db, const char* key, const std::wstring& value) {
     Statement statement(db, "INSERT INTO search_meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE search_meta.value<>excluded.value");
     statement.bytes(1, key); statement.text(2, value); statement.run();
 }
-void upsert(sqlite3* db, int64_t rootId, const std::wstring& path, const std::wstring& name,
-            DWORD attributes, uint64_t size, int64_t stamp, uint64_t frn = 0,bool sizeKnown=true,uint64_t modified=0) {
-    Statement statement(db, "INSERT INTO files(root_id,frn,path,path_fold,name,name_fold,folder,size,seen,size_known,modified) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(root_id,path_fold) DO UPDATE SET frn=coalesce(excluded.frn,files.frn),path=excluded.path,name=excluded.name,name_fold=excluded.name_fold,folder=excluded.folder,size=excluded.size,size_known=excluded.size_known,modified=excluded.modified,seen=max(files.seen,excluded.seen)");
+constexpr const char* fileUpsertSql="INSERT INTO files(root_id,frn,path,path_fold,name,name_fold,folder,size,seen,size_known,modified) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(root_id,path_fold) DO UPDATE SET frn=coalesce(excluded.frn,files.frn),path=excluded.path,name=excluded.name,name_fold=excluded.name_fold,folder=excluded.folder,size=CASE WHEN ?12 THEN files.size ELSE excluded.size END,size_known=CASE WHEN ?12 THEN files.size_known ELSE excluded.size_known END,modified=CASE WHEN ?12 THEN files.modified ELSE excluded.modified END,seen=max(files.seen,excluded.seen)";
+void writeFile(Statement& statement, int64_t rootId,const std::wstring& path,const std::wstring& name,
+               DWORD attributes,uint64_t size,int64_t stamp,uint64_t frn,bool sizeKnown,uint64_t modified,bool namesOnly){
+    StatementUse use(statement);
     statement.number(1, rootId);
     if (frn) statement.number(2, static_cast<int64_t>(frn)); else sqlite3_bind_null(statement.value, 2);
     statement.text(3, path); statement.text(4, fold(path)); statement.text(5, name); statement.text(6, fold(name));
     statement.number(7, (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0); statement.number(8, static_cast<int64_t>(size)); statement.number(9, stamp);
     statement.number(10,(attributes&FILE_ATTRIBUTE_DIRECTORY) ? 0 : sizeKnown);
     statement.number(11,(int64_t)modified);
+    statement.number(12,namesOnly);
     statement.run();
+}
+void upsert(sqlite3* db, int64_t rootId, const std::wstring& path, const std::wstring& name,
+            DWORD attributes, uint64_t size, int64_t stamp, uint64_t frn = 0,bool sizeKnown=true,uint64_t modified=0,bool namesOnly=false) {
+    Statement statement(db,fileUpsertSql);
+    writeFile(statement,rootId,path,name,attributes,size,stamp,frn,sizeKnown,modified,namesOnly);
 }
 std::wstring subtreePrefix(const std::wstring& path) { return fold(path) + (path.back() == L'\\' ? L"" : L"\\"); }
 void erase(sqlite3* db, int64_t rootId, const std::wstring& path) {
@@ -590,11 +603,14 @@ struct Root {
     int64_t id=0;
     std::wstring path;
     uint64_t rootFrn=0,journalId=0,enumCursor=0;
+    uint64_t recordEstimate=0, nodeCount=0, materialDone=0, unresolvedNodes=0;
     DWORD serial=0;
     Handle volume;
     NtfsPhase phase=NtfsPhase::Directory;
     int64_t buildStamp=0,initialUsn=0,nextUsn=0,materialCursor=0;
     bool materialFirst=true;
+    bool journalCaughtUp=true;
+    bool initialNative=false;
     Clock::time_point journalTick=Clock::now();
     std::unordered_map<uint64_t,std::pair<std::wstring,DWORD>> pathCache;
     size_t cacheCharacters=0;
@@ -605,6 +621,7 @@ struct Scan { int64_t id=0,rootId=0,stamp=0,queueId=0; std::wstring prefix,path;
 class Indexer {
 public:
     Database database;
+    std::unique_ptr<Statement> nodeWriter, nodeReader, fileWriter, fileMetadata;
     std::wstring dataPath;
     std::vector<std::wstring> ownDataAliases;
     std::vector<Root> roots;
@@ -613,11 +630,17 @@ public:
     std::map<int64_t,Scan> pausedScans;
     int64_t lastScanJob=0;
     uint64_t inaccessible=0,reparse=0,overflows=0;
-    std::vector<unsigned char> journalBuffer=std::vector<unsigned char>(64*1024);
+    std::vector<unsigned char> journalBuffer=std::vector<unsigned char>(256*1024);
+    const ULONGLONG started=GetTickCount64();
+    uint64_t initialRead=0;
     explicit Indexer(const fs::path& data) : database(data,4096),dataPath(normalize(data.wstring())) {
         ownDataAliases.push_back(fold(dataPath));
         auto physical=finalDirectory(dataPath);
         if(!physical.empty() && fold(physical)!=ownDataAliases.front()) ownDataAliases.push_back(fold(physical));
+        fileWriter=std::make_unique<Statement>(database.value,fileUpsertSql);
+        fileMetadata=std::make_unique<Statement>(database.value,"SELECT name,attributes,folder FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");
+        nodeWriter=std::make_unique<Statement>(database.value,"INSERT INTO ntfs_nodes(root_id,frn,parent_frn,name,folder,seen,attributes) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(root_id,frn) DO UPDATE SET parent_frn=excluded.parent_frn,name=excluded.name,folder=excluded.folder,seen=max(ntfs_nodes.seen,excluded.seen),attributes=excluded.attributes");
+        nodeReader=std::make_unique<Statement>(database.value,"SELECT parent_frn,name,attributes FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");
     }
     bool ownIndexPath(const std::wstring& path) {
         auto leaf=fold(fs::path(path).filename().wstring());
@@ -684,6 +707,7 @@ public:
                 if(!pending.row()) schedule(root.id,root.path);
             }
         }
+        for(const auto& volume:roots)initialRead+=volume.enumCursor;
         publish();
     }
     Root* root(int64_t id) { for(auto& candidate:roots) if(candidate.id==id) return &candidate; return nullptr; }
@@ -720,8 +744,8 @@ public:
     }
     void node(int64_t rootId,uint64_t frn,uint64_t parent,const std::wstring& name,bool folder,int64_t stamp,DWORD attributes=0) {
         if (!frn) return;
-        Statement insert(database.value,"INSERT INTO ntfs_nodes(root_id,frn,parent_frn,name,folder,seen,attributes) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(root_id,frn) DO UPDATE SET parent_frn=excluded.parent_frn,name=excluded.name,folder=excluded.folder,seen=max(ntfs_nodes.seen,excluded.seen),attributes=excluded.attributes");
-        insert.number(1,rootId); insert.number(2,static_cast<int64_t>(frn)); insert.number(3,static_cast<int64_t>(parent)); insert.text(4,name); insert.number(5,folder); insert.number(6,stamp); insert.number(7,attributes); insert.run();
+        auto& insert=*nodeWriter;StatementUse use(insert);
+        insert.number(1,rootId); insert.number(2,static_cast<int64_t>(frn)); insert.number(3,static_cast<int64_t>(parent)); insert.text(4,name); insert.number(5,folder); insert.number(6,stamp); insert.number(7,folder?attributes|FILE_ATTRIBUTE_DIRECTORY:attributes); insert.run();
     }
     bool scanning() {
         for(const auto& volume:roots) if(volume.phase==NtfsPhase::Enumerate || volume.phase==NtfsPhase::Materialize) return true;
@@ -729,6 +753,15 @@ public:
         Statement grams(database.value,"SELECT 1 FROM search_meta WHERE key='short_complete' AND value='0'");if(grams.row()) return true;
         Statement sorting(database.value,"SELECT 1 FROM search_meta WHERE key IN('sort_name','sort_path','sort_size','sort_type','size_complete','sort_modified','modified_complete') AND value='0' LIMIT 1");if(sorting.row()) return true;
         Statement jobs(database.value,"SELECT 1 FROM scan_jobs LIMIT 1"); return jobs.row();
+    }
+    bool initialMft() const {
+        return std::any_of(roots.begin(),roots.end(),[](const auto& volume){return volume.phase==NtfsPhase::Enumerate||volume.phase==NtfsPhase::Materialize||volume.initialNative;});
+    }
+    bool coveragePending(){
+        if(initialMft())return true;
+        for(const auto& volume:roots)if(volume.phase==NtfsPhase::Journal&&!volume.journalCaughtUp)return true;
+        Statement refresh(database.value,"SELECT 1 FROM ntfs_refresh LIMIT 1");if(refresh.row())return true;
+        Statement jobs(database.value,"SELECT 1 FROM scan_jobs LIMIT 1");return jobs.row();
     }
     bool tryNtfs(Root& volume) {
         // The launcher requests elevation; this worker reads an existing
@@ -738,6 +771,9 @@ public:
         if(!GetVolumeInformationW(volume.path.c_str(),nullptr,0,&volume.serial,nullptr,nullptr,filesystem,32) || _wcsicmp(filesystem,L"NTFS")) return false;
         volume.volume.reset(CreateFileW((L"\\\\.\\"+volume.path.substr(0,2)).c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
         if(!volume.volume) return false;
+        NTFS_VOLUME_DATA_BUFFER layout{};DWORD layoutBytes=0;
+        if(DeviceIoControl(volume.volume.value,FSCTL_GET_NTFS_VOLUME_DATA,nullptr,0,&layout,sizeof(layout),&layoutBytes,nullptr)&&layout.BytesPerFileRecordSegment&&layout.MftValidDataLength.QuadPart>0)
+            volume.recordEstimate=static_cast<uint64_t>(layout.MftValidDataLength.QuadPart)/layout.BytesPerFileRecordSegment;
         USN_JOURNAL_DATA_V0 journal{};DWORD returned=0;
         if(!DeviceIoControl(volume.volume.value,FSCTL_QUERY_USN_JOURNAL,nullptr,0,&journal,sizeof(journal),&returned,nullptr)) {volume.volume.reset();return false;}
         Handle directory(CreateFileW(extended(volume.path).c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr));
@@ -745,20 +781,25 @@ public:
         if(!directory || !GetFileInformationByHandle(directory.value,&information)) {volume.volume.reset();return false;}
         volume.rootFrn=(static_cast<uint64_t>(information.nFileIndexHigh)<<32)|information.nFileIndexLow;
         if(!restoreMft(volume,journal)) beginMft(volume,journal);
+        Statement count(database.value,"SELECT count(*) FROM ntfs_nodes WHERE root_id=?1");count.number(1,volume.id);if(count.row())volume.nodeCount=sqlite3_column_int64(count.value,0);
+        if(volume.phase==NtfsPhase::Materialize&&!volume.materialFirst){Statement done(database.value,"SELECT count(*) FROM ntfs_nodes WHERE root_id=?1 AND frn<=?2");done.number(1,volume.id);done.number(2,volume.materialCursor);if(done.row())volume.materialDone=sqlite3_column_int64(done.value,0);}
         return true;
     }
     bool restoreMft(Root& volume,const USN_JOURNAL_DATA_V0& journal) {
-        Statement stored(database.value,"SELECT journal_id,next_usn,serial,complete,mode,build_phase,enum_cursor,material_cursor,build_stamp,initial_usn FROM search_roots WHERE id=?1");
+        Statement stored(database.value,"SELECT journal_id,next_usn,serial,complete,mode,build_phase,enum_cursor,material_cursor,build_stamp,initial_usn,unresolved_nodes FROM search_roots WHERE id=?1");
         stored.number(1,volume.id);
         if(!stored.row() || sqlite3_column_type(stored.value,0)==SQLITE_NULL ||
            wide(sqlite3_column_text(stored.value,0))!=std::to_wstring(journal.UsnJournalID) ||
            static_cast<DWORD>(sqlite3_column_int64(stored.value,2))!=volume.serial ||
            wide(sqlite3_column_text(stored.value,4))!=L"ntfs") return false;
         const auto checkpoint=sqlite3_column_int64(stored.value,1);
+        volume.unresolvedNodes=sqlite3_column_int64(stored.value,10);
         const auto stage=wide(sqlite3_column_text(stored.value,5));
         const bool complete=sqlite3_column_int(stored.value,3)!=0;
+        volume.initialNative=!complete;
         if((complete || stage==L"journal") && checkpoint>=journal.FirstUsn && checkpoint<=journal.NextUsn) {
             volume.journalId=journal.UsnJournalID;volume.nextUsn=checkpoint;volume.phase=NtfsPhase::Journal;
+            volume.journalCaughtUp=checkpoint>=journal.NextUsn;
             if(!complete) {
                 Statement pending(database.value,"SELECT 1 FROM scan_jobs WHERE root_id=?1 LIMIT 1");pending.number(1,volume.id);
                 if(!pending.row()) schedule(volume.id,volume.path);
@@ -777,12 +818,12 @@ public:
         return true;
     }
     void checkpointMft(const Root& volume) {
-        Statement save(database.value,"UPDATE search_roots SET mode='ntfs',journal_id=?2,next_usn=?3,serial=?4,build_phase=?5,enum_cursor=?6,material_cursor=?7,build_stamp=?8,initial_usn=?9 WHERE id=?1");
+        Statement save(database.value,"UPDATE search_roots SET mode='ntfs',journal_id=?2,next_usn=?3,serial=?4,build_phase=?5,enum_cursor=?6,material_cursor=?7,build_stamp=?8,initial_usn=?9,unresolved_nodes=?10 WHERE id=?1");
         save.number(1,volume.id);save.text(2,std::to_wstring(volume.journalId));save.number(3,volume.nextUsn);save.number(4,volume.serial);
         save.text(5,volume.phase==NtfsPhase::Enumerate?L"enumerate":volume.phase==NtfsPhase::Materialize?L"materialize":L"journal");
         save.number(6,static_cast<int64_t>(volume.enumCursor));
         if(volume.materialFirst) sqlite3_bind_null(save.value,7);else save.number(7,volume.materialCursor);
-        save.number(8,volume.buildStamp);save.number(9,volume.initialUsn);save.run();
+        save.number(8,volume.buildStamp);save.number(9,volume.initialUsn);save.number(10,volume.unresolvedNodes);save.run();
     }
     void discardDirectoryScans(int64_t rootId) {
         if(active && active->rootId==rootId) active.reset();
@@ -795,6 +836,9 @@ public:
     void beginMft(Root& volume,const USN_JOURNAL_DATA_V0& journal) {
         volume.phase=NtfsPhase::Enumerate;volume.enumCursor=0;volume.buildStamp=epoch();volume.initialUsn=journal.NextUsn;
         volume.journalId=journal.UsnJournalID;volume.nextUsn=journal.NextUsn;volume.materialFirst=true;volume.clearCache();
+        volume.nodeCount=1;volume.materialDone=0;volume.unresolvedNodes=0;
+        volume.journalCaughtUp=false;
+        volume.initialNative=true;
         Transaction transaction(database.value);
         discardDirectoryScans(volume.id);
         Statement reset(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1");reset.number(1,volume.id);reset.run();
@@ -804,7 +848,7 @@ public:
         transaction.commit();
     }
     void directoryFallback(Root& volume) {
-        volume.phase=NtfsPhase::Directory;volume.volume.reset();volume.clearCache();
+        volume.phase=NtfsPhase::Directory;volume.volume.reset();volume.clearCache();volume.initialNative=false;
         Statement state(database.value,"UPDATE search_roots SET mode='directory',journal_id=NULL,next_usn=NULL,build_phase='' WHERE id=?1");state.number(1,volume.id);state.run();
         if(std::none_of(watchers.begin(),watchers.end(),[&](const auto& watcher){return watcher->rootId==volume.id;}))
             watchers.push_back(std::make_unique<Watcher>(volume.id,volume.path));
@@ -815,9 +859,9 @@ public:
         if(auto cached=volume.pathCache.find(file);cached!=volume.pathCache.end()) return cached->second.first;
         std::vector<std::wstring> components;
         std::vector<uint64_t> visited;
+        std::vector<DWORD> componentAttributes;
         auto current=file;
         size_t total=volume.path.size();
-        DWORD targetAttributes=0;
         std::wstring prefix=volume.path;
         while(current!=volume.rootFrn) {
             if(std::find(visited.begin(),visited.end(),current)!=visited.end()) return std::nullopt;
@@ -825,10 +869,9 @@ public:
             if(current!=file) if(auto cached=volume.pathCache.find(current);cached!=volume.pathCache.end()) {
                 prefix=cached->second.first;break;
             }
-            Statement get(database.value,"SELECT parent_frn,name,attributes FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");
+            auto& get=*nodeReader;StatementUse use(get);
             get.number(1,volume.id);get.number(2,static_cast<int64_t>(current));
             if(!get.row()) return std::nullopt;
-            if(current==file) targetAttributes=static_cast<DWORD>(sqlite3_column_int64(get.value,2));
             // MFT parent IDs describe physical entries, not link traversal.
             // Cloud reparse directories may have real children in the MFT.
             auto parent=static_cast<uint64_t>(sqlite3_column_int64(get.value,0));
@@ -836,25 +879,32 @@ public:
             if(name.empty() || parent==current || name.find_first_of(L"\\/")!=std::wstring::npos) return std::nullopt;
             total+=name.size()+1;if(total>32760) return std::nullopt;
             components.push_back(std::move(name));current=parent;
+            componentAttributes.push_back(static_cast<DWORD>(sqlite3_column_int64(get.value,2)));
         }
-        for(auto component=components.rbegin();component!=components.rend();++component) prefix=join(prefix,*component);
-        if(volume.pathCache.size()>=2048 || volume.cacheCharacters+prefix.size()>512*1024) volume.clearCache();
-        volume.cacheCharacters+=prefix.size();volume.pathCache.emplace(file,std::make_pair(prefix,targetAttributes));
+        for(size_t index=components.size();index>0;--index){
+            const auto position=index-1;prefix=join(prefix,components[position]);
+            if(componentAttributes[position]&FILE_ATTRIBUTE_DIRECTORY){
+                if(volume.pathCache.size()>=2048||volume.cacheCharacters+prefix.size()>512*1024)volume.clearCache();
+                auto inserted=volume.pathCache.emplace(visited[position],std::make_pair(prefix,componentAttributes[position]));
+                if(inserted.second)volume.cacheCharacters+=prefix.size();
+            }
+        }
         return prefix;
     }
-    void materialize(Root& volume,uint64_t file,int64_t stamp) {
+    void materialize(Root& volume,uint64_t file,int64_t stamp,bool readMetadata=true) {
         if(file==volume.rootFrn) return;
         auto path=nodePath(volume,file);
-        if(!path || ownIndexPath(*path)) return;
-        Statement metadata(database.value,"SELECT name,attributes,folder FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");metadata.number(1,volume.id);metadata.number(2,static_cast<int64_t>(file));
+        if(!path){if(!readMetadata)++volume.unresolvedNodes;return;}
+        if(ownIndexPath(*path))return;
+        auto& metadata=*fileMetadata;StatementUse metadataUse(metadata);metadata.number(1,volume.id);metadata.number(2,static_cast<int64_t>(file));
         if(!metadata.row()) return;
         auto name=wide(sqlite3_column_text(metadata.value,0));auto attributes=static_cast<DWORD>(sqlite3_column_int64(metadata.value,1));
         if(sqlite3_column_int(metadata.value,2)) attributes|=FILE_ATTRIBUTE_DIRECTORY;
         uint64_t size=0;
         bool known=false;
         WIN32_FILE_ATTRIBUTE_DATA actual{};
-        if(GetFileAttributesExW(extended(*path).c_str(),GetFileExInfoStandard,&actual)) {attributes=actual.dwFileAttributes;size=(static_cast<uint64_t>(actual.nFileSizeHigh)<<32)|actual.nFileSizeLow;known=true;}
-        upsert(database.value,volume.id,*path,name,attributes,size,stamp,file,known,known?fileTicks(actual.ftLastWriteTime):0);
+        if(readMetadata&&GetFileAttributesExW(extended(*path).c_str(),GetFileExInfoStandard,&actual)) {attributes=actual.dwFileAttributes;size=(static_cast<uint64_t>(actual.nFileSizeHigh)<<32)|actual.nFileSizeLow;known=true;}
+        writeFile(*fileWriter,volume.id,*path,name,attributes,size,stamp,file,known,known?fileTicks(actual.ftLastWriteTime):0,!readMetadata);
     }
     void refresh(Root& volume,uint64_t file,int64_t stamp) {
         Statement insert(database.value,"INSERT INTO ntfs_refresh VALUES(?1,?2,?3) ON CONFLICT(root_id,frn) DO UPDATE SET stamp=max(stamp,excluded.stamp)");
@@ -942,14 +992,12 @@ public:
                 if(length<sizeof(uint64_t)) {directoryFallback(volume);continue;}
                 uint64_t next=0;memcpy(&next,journalBuffer.data(),sizeof(next));
                 if(next<=volume.enumCursor) {directoryFallback(volume);continue;}
-                std::vector<uint64_t> partial;
                 Transaction transaction(database.value);
                 bool valid=search_detail::visitUsnRecords(journalBuffer.data()+sizeof(uint64_t),length-sizeof(uint64_t),[&](uint64_t file,uint64_t parent,int64_t,DWORD,DWORD attributes,const std::wstring& name) {
-                    node(volume.id,file,parent,name,(attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,volume.buildStamp,attributes);partial.push_back(file);
+                    node(volume.id,file,parent,name,(attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,volume.buildStamp,attributes);
+                    if(file!=volume.rootFrn)++volume.nodeCount;
                 });
                 if(valid) {
-                    volume.clearCache();
-                    for(auto file:partial) materialize(volume,file,volume.buildStamp);
                     volume.enumCursor=next;
                     checkpointMft(volume);
                 }
@@ -957,19 +1005,21 @@ public:
                 if(!valid) directoryFallback(volume);
             } else if(volume.phase==NtfsPhase::Materialize) {
                 working=true;
-                Statement nodes(database.value,"SELECT frn FROM ntfs_nodes WHERE root_id=?1 AND (?2 IS NULL OR frn>?2) ORDER BY frn LIMIT 256");
-                nodes.number(1,volume.id);if(volume.materialFirst) sqlite3_bind_null(nodes.value,2);else nodes.number(2,volume.materialCursor);
+                Statement nodes(database.value,volume.materialFirst?"SELECT frn FROM ntfs_nodes WHERE root_id=?1 ORDER BY frn LIMIT 512":"SELECT frn FROM ntfs_nodes WHERE root_id=?1 AND frn>?2 ORDER BY frn LIMIT 512");
+                nodes.number(1,volume.id);if(!volume.materialFirst)nodes.number(2,volume.materialCursor);
                 std::vector<uint64_t> pending;while(nodes.row()) pending.push_back(static_cast<uint64_t>(sqlite3_column_int64(nodes.value,0)));
                 if(pending.empty()) {
                     Transaction transaction(database.value);
                     volume.phase=NtfsPhase::Journal;volume.nextUsn=volume.initialUsn;
+                    volume.journalCaughtUp=false;
                     // MFT contains one name per file ID. A native supplement
                     // records every hardlink path and accessible-directory scope.
                     schedule(volume.id,volume.path);
                     checkpointMft(volume);transaction.commit();
                 } else {
                     Transaction transaction(database.value);
-                    for(auto file:pending) materialize(volume,file,volume.buildStamp);
+                    for(auto file:pending) materialize(volume,file,volume.buildStamp,false);
+                    volume.materialDone+=pending.size();
                     volume.materialFirst=false;volume.materialCursor=static_cast<int64_t>(pending.back());
                     checkpointMft(volume);transaction.commit();
                 }
@@ -993,6 +1043,7 @@ public:
                         checkpoint.number(1,volume.id);checkpoint.text(2,std::to_wstring(volume.journalId));checkpoint.number(3,next);checkpoint.number(4,volume.serial);checkpoint.run();
                     }
                     volume.nextUsn=next;
+                    volume.journalCaughtUp=next>=journal.NextUsn;
                 }
                 transaction.commit();
                 if(!valid) directoryFallback(volume);
@@ -1019,9 +1070,14 @@ public:
                 if (!queued.row()) {
                     Statement repeat(database.value,"SELECT dirty FROM scan_jobs WHERE id=?1");repeat.number(1,scan.id);
                     bool dirty=repeat.row() && sqlite3_column_int(repeat.value,0)!=0;
-                    Statement cleanup(database.value,"DELETE FROM files WHERE root_id=?1 AND seen<?2 AND (path_fold=?3 OR (path_fold>=?4 AND path_fold<?5))");
+                    // MFT confirms primary names even when Win32 enumeration
+                    // cannot expose them. Keep this build's native records;
+                    // USN replay handles deletion and rename during the build.
+                    auto* nativeVolume=root(scan.rootId);
+                    const bool nativeSnapshot=nativeVolume&&nativeVolume->phase==NtfsPhase::Journal&&nativeVolume->initialNative;
+                    Statement cleanup(database.value,"DELETE FROM files WHERE root_id=?1 AND seen<?2 AND (path_fold=?3 OR (path_fold>=?4 AND path_fold<?5)) AND (?6=0 OR frn IS NULL OR seen<?6 OR NOT EXISTS(SELECT 1 FROM ntfs_nodes WHERE ntfs_nodes.root_id=files.root_id AND ntfs_nodes.frn=files.frn))");
                     auto prefix=subtreePrefix(scan.prefix),upper=prefix;upper.back()=L']';
-                    cleanup.number(1,scan.rootId); cleanup.number(2,scan.stamp); cleanup.text(3,fold(scan.prefix)); cleanup.text(4,prefix); cleanup.text(5,upper); cleanup.run();
+                    cleanup.number(1,scan.rootId); cleanup.number(2,scan.stamp); cleanup.text(3,fold(scan.prefix)); cleanup.text(4,prefix); cleanup.text(5,upper);cleanup.number(6,nativeSnapshot?nativeVolume->buildStamp:0);cleanup.run();
                     Statement finish(database.value,"DELETE FROM scan_jobs WHERE id=?1"); finish.number(1,scan.id);finish.run();
                     if(auto* volume=root(scan.rootId);volume && fold(scan.prefix)==fold(volume->path)) {
                         if(volume->phase==NtfsPhase::Directory || volume->phase==NtfsPhase::Journal) {
@@ -1031,6 +1087,7 @@ public:
                         oldNodes.number(1,scan.rootId);oldNodes.number(2,scan.stamp);oldNodes.number(3,static_cast<int64_t>(volume->rootFrn));oldNodes.run();
                     }
                     if(dirty) schedule(scan.rootId,scan.prefix);
+                    if(nativeVolume&&fold(scan.prefix)==fold(nativeVolume->path))nativeVolume->initialNative=dirty;
                     transaction.commit();active.reset();return true;
                 }
                 scan.queueId=sqlite3_column_int64(queued.value,0);scan.path=wide(sqlite3_column_text(queued.value,1));
@@ -1139,12 +1196,35 @@ public:
     void publish() {
         Transaction transaction(database.value);
         meta(database.value,"pid",std::to_wstring(GetCurrentProcessId()));
-        meta(database.value,"building",scanning()?L"1":L"0");
+        const bool allWork=scanning(),busy=coveragePending();
+        meta(database.value,"building",busy?L"1":L"0");
+        Statement coverage(database.value,"SELECT count(*),coalesce(sum(complete),0) FROM search_roots");coverage.row();
+        const auto rootCount=sqlite3_column_int64(coverage.value,0),completed=sqlite3_column_int64(coverage.value,1);
+        uint64_t records=0,readCursor=0,estimated=0;bool enumerating=false,paths=false,estimateKnown=true;
+        for(const auto& volume:roots){
+            records+=volume.nodeCount;
+            if(volume.phase==NtfsPhase::Enumerate){enumerating=true;readCursor+=volume.enumCursor;estimated+=std::max(volume.enumCursor,volume.recordEstimate);if(!volume.recordEstimate)estimateKnown=false;}
+            else{readCursor+=volume.enumCursor;estimated+=volume.enumCursor;}
+            paths|=volume.phase==NtfsPhase::Materialize;
+        }
+        meta(database.value,"roots",std::to_wstring(rootCount));meta(database.value,"completed_roots",std::to_wstring(completed));
+        meta(database.value,"complete",!busy&&rootCount>0&&completed==rootCount?L"1":L"0");
+        meta(database.value,"read_records",std::to_wstring(records));
+        meta(database.value,"estimated_records",std::to_wstring(estimateKnown?estimated:0));
+        bool catchingUp=false;for(const auto& volume:roots)catchingUp|=volume.phase==NtfsPhase::Journal&&!volume.journalCaughtUp;
+        meta(database.value,"stage",enumerating?L"records":paths?L"paths":catchingUp?L"changes":busy?L"directories":allWork?L"metadata":L"ready");
+        const auto elapsed=(GetTickCount64()-started)/1000;
+        if(busy)meta(database.value,"elapsed_seconds",std::to_wstring(elapsed));
+        int64_t remaining=-1;
+        if(enumerating&&estimateKnown&&elapsed>=5&&readCursor>initialRead&&estimated>readCursor)
+            remaining=(int64_t)std::min<double>(30.0*86400,(double)(estimated-readCursor)*elapsed/(readCursor-initialRead));
+        meta(database.value,"estimated_stage_seconds",std::to_wstring(remaining));
         size_t ntfs=0;for(const auto& volume:roots) if(volume.phase!=NtfsPhase::Directory) ++ntfs;
         std::wstring message=ntfs ? L"NTFS MFT / USN 模式 · "+std::to_wstring(ntfs)+L" 个卷" : L"普通目录模式";
         if(ntfs && ntfs<roots.size()) message+=L" · "+std::to_wstring(roots.size()-ntfs)+L" 个普通目录";
         if(!ntfs) message+=L" · "+std::to_wstring(roots.size())+L" 个根目录";
-        if(scanning()) message+=L" · 分批校准中，已有结果可用";
+        if(busy) message+=L" · 索引未完成，结果尚不完整";
+        else if(allWork)message+=L" · 名称索引已完成，排序与元数据补齐中";
         else message+=L" · 实时目录通知";
         if(inaccessible) message+=L" · 无权限目录 "+std::to_wstring(inaccessible);
         if(reparse) message+=L" · 跳过重解析目录 "+std::to_wstring(reparse);
@@ -1152,6 +1232,9 @@ public:
         Statement grams(database.value,"SELECT 1 FROM search_meta WHERE key='short_complete' AND value='0'");if(grams.row()) message+=L" · 短词索引分批补全中";
         size_t offline=0;for(const auto& watcher:watchers) if(!watcher->directory) ++offline;
         if(offline) message+=L" · "+std::to_wstring(offline)+L" 个根目录不可监听，等待恢复";
+        uint64_t unresolved=0;for(const auto& volume:roots)unresolved+=volume.unresolvedNodes;
+        if(unresolved)message+=L" · 无法还原路径 "+std::to_wstring(unresolved);
+        meta(database.value,"limited",inaccessible||offline||unresolved?L"1":L"0");
         message+=L" · 排除本工具索引文件及侧文件";
         meta(database.value,"message",message);transaction.commit();
     }
@@ -1806,11 +1889,20 @@ SearchStatus SearchStore::status() {
             if(key=="total") state.total=std::stoll(value);
             else if(key=="building") state.building=value==L"1";
             else if(key=="message") state.message=std::move(value);
+            else if(key=="complete")state.complete=value==L"1";
+            else if(key=="limited")state.limited=value==L"1";
+            else if(key=="roots")state.roots=std::stoi(value);
+            else if(key=="completed_roots")state.completedRoots=std::stoi(value);
+            else if(key=="read_records")state.readRecords=std::stoll(value);
+            else if(key=="estimated_records")state.estimatedRecords=std::stoll(value);
+            else if(key=="elapsed_seconds")state.elapsedSeconds=std::stoll(value);
+            else if(key=="estimated_stage_seconds")state.estimatedStageSeconds=std::stoll(value);
+            else if(key=="stage")state.stage=std::move(value);
             else if(key=="pid") pid=static_cast<DWORD>(std::stoul(value));
         }
         if(pid) {
             Handle process(OpenProcess(SYNCHRONIZE,FALSE,pid));
-            if((process && WaitForSingleObject(process.value,0)==WAIT_OBJECT_0) || (!process && GetLastError()==ERROR_INVALID_PARAMETER)) {state.building=false;state.message=L"索引进程已停止，已有索引仍可查询";}
+            if((process && WaitForSingleObject(process.value,0)==WAIT_OBJECT_0) || (!process && GetLastError()==ERROR_INVALID_PARAMETER)) {state.building=false;state.complete=false;state.stage=L"stopped";state.message=L"索引进程已停止，已有索引仍可查询";}
         }
         if(!impl_->queryMessage.empty()) state.message+=L" · "+impl_->queryMessage;
         std::lock_guard cachedLock(impl_->cachedMutex);impl_->cached=state;
@@ -1855,14 +1947,16 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
             working=indexer.scanBatch() || working;
             working=search_detail::backfillShortGrams(indexer.database.value,256) || working;
             working=search_detail::prepareSortIndexes(indexer.database.value,256) || working;
-            working=search_detail::backfillFileSizes(indexer.database.value,64) || working;
-            working=search_detail::backfillModified(indexer.database.value,64) || working;
+            if(!indexer.coveragePending()){
+                working=search_detail::backfillFileSizes(indexer.database.value,64) || working;
+                working=search_detail::backfillModified(indexer.database.value,64) || working;
+            }
             if(Clock::now()-published>=std::chrono::seconds(1) || (!working && indexer.scanning())) {indexer.publish();published=Clock::now();}
             std::vector<HANDLE> waits{stop.value};
             if(parent) waits.push_back(parent.value);
             const auto cpuAfter=cpuTicks();
             const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-began).count()/100;
-            const auto rest=search_detail::backgroundDelayMs(cpuAfter-cpuBefore,(uint64_t)std::max<int64_t>(0,elapsed),processors);
+            const auto rest=search_detail::backgroundDelayMs(cpuAfter-cpuBefore,(uint64_t)std::max<int64_t>(0,elapsed),processors,indexer.initialMft());
             // A continuously signaled watcher must not cancel the CPU rest;
             // stop and parent exit still interrupt it immediately.
             if(rest && WaitForMultipleObjects(static_cast<DWORD>(waits.size()),waits.data(),FALSE,rest)!=WAIT_TIMEOUT) break;

@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "clipboard.hpp"
 #include "search.hpp"
+#include "index_status.hpp"
 #include "capture.hpp"
 #include "translation.hpp"
 #include "settings.hpp"
@@ -294,7 +295,8 @@ class Application {
     HBITMAP originalImage = nullptr, resultImage = nullptr, previewImage = nullptr;
     image_tools_detail::MemoryLease originalMemory, resultMemory;
     bool showOriginal = false;
-    Tasks queryTasks, previewTasks, clipboardReaderTasks, clipboardTasks, ocrTasks;
+    Tasks queryTasks, indexStatusTasks, previewTasks, clipboardReaderTasks, clipboardTasks, ocrTasks;
+    std::atomic<bool> indexStatusQueued=false;
     std::atomic_size_t pendingClipboardBytes{0};
     std::wstring recordingWarning, hotkeyWarning;
     std::wstring historyFailure, searchFailure;
@@ -383,6 +385,7 @@ class Application {
         stopIndexWorker(data);
         shutdownRecording();
         queryTasks.shutdown();
+        indexStatusTasks.shutdown();
         previewTasks.shutdown();
         clipboardReaderTasks.shutdown();
         clipboardTasks.shutdown();
@@ -706,7 +709,7 @@ class Application {
         float right=client.right/scale-panel_layout::margin;
         int count=mode==0?(int)fileRows.size():(int)historyRows.size();
         int shown=std::min(visibleRows(),std::max(0,count-scroll));
-        if(x<panel_layout::margin||x>=right||y<top||y>=top+shown*height||y>=client.bottom/scale-panel_layout::margin)return -1;
+        if(x<panel_layout::margin||x>=right||y<top||y>=top+shown*height||y>=panel_layout::listBottom(mode,client.bottom/scale))return -1;
         return scroll+(int)((y-top)/height);
     }
     std::vector<std::wstring> selectedFilePaths() const {
@@ -1012,8 +1015,21 @@ class Application {
             text(fileModifiedLabel(item.modified),{sizeEnd+8,y+4,right-8,y+25},12,fg,false,false);
         }
         if(fileRows.empty()) {
-            text(pendingQuery||listInFlight?L"搜索中…":L"没有匹配文件",{16,112,right-12,142},13,muted);
+            text(pendingQuery||listInFlight?L"搜索中…":indexEmptyLabel(indexStatus),{16,112,right-12,142},13,muted);
+            if(!indexStatus.complete)text(indexProgressLabel(indexStatus),{16,146,right-12,177},12,muted);
         }
+        const float footer=h-panel_layout::fileFooterHeight;
+        rect({0,footer,w,h},dark()?0x20232a:0xf3f4f6);
+        rect({0,footer,w,footer+1},dark()?0x343842:0xdfe3e8);
+        text(indexObjectCount(indexStatus.total),{8,footer+5,190,h-2},12,fg,false,false);
+        text(indexProgressLabel(indexStatus),{194,footer+5,w-8,h-2},12,muted,false,false);
+    }
+    void refreshIndexStatus(){
+        if(closing||!files||indexStatusQueued.exchange(true))return;
+        if(!indexStatusTasks.add([this]{
+            auto result=std::make_unique<Result>();result->type=28;
+            try{result->index=files->status();publish(result.release());}catch(...){indexStatusQueued=false;}
+        }))indexStatusQueued=false;
     }
     void show(int requested) {
         HWND foreground = GetForegroundWindow();
@@ -1632,6 +1648,8 @@ class Application {
             if (!count) {
                 detailText.clear();if (previewImage) DeleteObject(previewImage);previewImage = nullptr;
             } else if (r->listAction != 2 && r->listAction != 3) preview();
+        } else if (r->type == 28) {
+            indexStatusQueued=false;indexStatus=r->index;
         } else if (r->type == 26) {
             if (r->generation != generation || r->listRequest != listRequest) return;
             listInFlight = false;
@@ -2351,8 +2369,9 @@ class Application {
                     KillTimer(hwnd, 1);
                     app->query(true);
                 }
-                if (wp == 2 && IsWindowVisible(hwnd) && app->mode == 0)
-                    app->query(false, true);
+                if (wp == 2 && IsWindowVisible(hwnd) && app->mode == 0){
+                    app->refreshIndexStatus();app->query(false, true);
+                }
                 if (wp == 9) {
                     PROCESS_MEMORY_COUNTERS_EX memory{};
                     memory.cb = sizeof(memory);

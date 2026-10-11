@@ -1,4 +1,4 @@
-param([string]$PackagePath,[string]$OutputDirectory='',[string]$Version='0.3.5.0',
+param([string]$PackagePath,[string]$OutputDirectory='',[string]$Version='0.3.6.0',
       [ValidateSet('x64','x86','ARM64')][string]$Architecture='x64',
       [string]$BinaryDirectory='', [string]$CertificatePath='',
       [string]$CertificateThumbprint='5E73D2B83E4733BB81072695B845044028283DA4')

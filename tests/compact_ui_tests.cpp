@@ -30,6 +30,14 @@ int main(int argc,char** argv){
         }
         require(app.rowAtPoint(45,client.bottom/app.scale-12)==-1,"unused final space must not activate an absent row");
         app.paint();for(auto& button:app.buttons)require(button.first.bottom<=96,"file action/filter/footer buttons must be removed from the list area");
+        app.indexStatus.total=17590295;app.indexStatus.building=true;app.indexStatus.stage=L"records";
+        require(indexObjectCount(app.indexStatus.total)==L"17,590,295 个对象","object count must include grouping separators");
+        require(indexEmptyLabel(app.indexStatus).find(L"尚未完成")!=std::wstring::npos,"empty initial-build results must disclose incomplete coverage");
+        require(app.rowAtPoint(45,client.bottom/app.scale-5)==-1,"object-count footer must not select a file row");
+        app.indexStatus.complete=true;app.indexStatus.building=false;app.indexStatus.stage=L"ready";
+        require(indexProgressLabel(app.indexStatus)==L"索引就绪","completed coverage label");
+        app.indexStatus.limited=true;
+        require(indexEmptyLabel(app.indexStatus).find(L"受限")!=std::wstring::npos,"limited coverage must remain visible in empty results");
         if(!isolated){
         app.history->append(textPayload());ClipPayload opaque;opaque.source=L"Synthetic opaque source";opaque.formats.push_back({0xc001,L"Synthetic private format",{1,2,3}});app.history->append(opaque);
         app.mode=1;app.layout();app.query(true);pumpUntil([&]{return !app.pendingQuery&&!app.listInFlight&&app.historyRows.size()==2;});

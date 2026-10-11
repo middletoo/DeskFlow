@@ -49,6 +49,38 @@ int main() {
         USN_JOURNAL_DATA_V0 journal{};
         journal.UsnJournalID=77;journal.FirstUsn=10;journal.NextUsn=200;
         {
+            auto keywordRoot=base/L"keyword-fixture";fs::create_directories(keywordRoot/L"late-parent");
+            std::ofstream(keywordRoot/L"late-parent"/L"DeskFlow.exe")<<"synthetic executable fixture";
+            auto keywordData=base/L"keyword-data";
+            desk::Indexer index(keywordData);index.initialize({keywordRoot.wstring()});
+            auto& volume=index.roots.front();volume.rootFrn=5;volume.serial=123;index.beginMft(volume,journal);
+            index.node(volume.id,100,300,L"DeskFlow.exe",false,volume.buildStamp);
+            require(!index.nodePath(volume,100),"a child with a missing parent cannot be assigned a fabricated path");
+            index.node(volume.id,300,5,L"late-parent",true,volume.buildStamp);
+            index.node(volume.id,200,300,L"KnownDenied.exe",false,volume.buildStamp);
+            volume.phase=desk::NtfsPhase::Materialize;
+            for(int batch=0;batch<8&&volume.phase==desk::NtfsPhase::Materialize;++batch)index.ntfsBatch();
+            index.publish();
+            desk::SearchStore reader(keywordData);
+            auto hits=reader.query(L"deskflow");
+            require(hits.size()==1&&hits.front().path==(keywordRoot/L"late-parent"/L"DeskFlow.exe").wstring(),
+                    "complete MFT materialization missed a filename whose parent arrived later");
+            require(!reader.status().complete,"MFT paths alone must not claim directory/hardlink coverage is complete");
+            require(!hits.front().sizeKnown,"names-first indexing should disclose pending metadata");
+            for(int batch=0;batch<20&&index.scanBatch();++batch){}
+            index.publish();require(!reader.status().complete,"journal changes must catch up before declaring complete coverage");
+            volume.journalCaughtUp=true;index.publish();hits=reader.query(L"deskflow");
+            require(reader.status().complete&&hits.size()==1&&hits.front().sizeKnown&&hits.front().size>0&&hits.front().modified>0,
+                    "directory supplement must finish coverage and fill file metadata");
+            require(reader.query(L"KnownDenied").size()==1,"directory supplement removed a primary name confirmed by the native snapshot");
+            index.journalChange(volume,200,300,201,USN_REASON_FILE_DELETE,FILE_ATTRIBUTE_NORMAL,L"KnownDenied.exe");
+            require(reader.query(L"KnownDenied").empty(),"journal deletion must remove a retained native primary name");
+            volume.clearCache();index.materialize(volume,100,volume.buildStamp,false);
+            hits=reader.query(L"deskflow");
+            require(hits.front().sizeKnown&&hits.front().size>0&&hits.front().modified>0,
+                    "resumed names-first work must retain already known metadata");
+        }
+        {
             desk::Indexer index(mft);index.initialize({root.wstring()});
             auto& volume=index.roots.front();volume.rootFrn=5;volume.serial=123;
             index.beginMft(volume,journal);

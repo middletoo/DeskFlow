@@ -21,10 +21,10 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 自行开发时，生成并检查证书后，在自己的开发设备确认信任该已知叶证书到 Trusted People，再注册包。
 
 ```powershell
-pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.5.0
+pwsh -File scripts/package.ps1 -SkipBuild -CreateDevelopmentCertificate -Version 0.3.6.0
 # 检查证书后，在管理员 PowerShell 中执行：
 Import-Certificate -FilePath artifacts/msix/DeskFlow-Development.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.5.0-x64.msix
+Add-AppxPackage -Path artifacts/msix/DeskFlow-0.3.6.0-x64.msix
 ```
 
 不要提交 PFX/私钥、个人设置或生成的信任材料。

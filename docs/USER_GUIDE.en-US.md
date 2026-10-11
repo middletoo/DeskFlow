@@ -30,6 +30,8 @@ Hover over a top function entry to see its current hotkey. Change keys in Tools 
 
 ![File search](images/files.png)
 
+The lower-left total includes indexed files and folders, rather than matches for the current query. Initial builds show their stage and elapsed time. Remaining time during record reading is a measured stage estimate, not a fixed countdown. Results can be incomplete until path construction and directory reconciliation finish; empty results disclose this. Inaccessible or unresolved paths and unavailable roots are also reported, so a limited scan is not presented as full coverage. Initial NTFS work temporarily uses a higher processing budget; incremental updates retain the lower background CPU budget.
+
 Press Alt+Q and enter a filename. Spaces combine terms with AND, for example `report 2026`. Names are matched by default; enable full-path matching in Search to include parent directories. Use `ext:pdf`, `ext:pdf;docx`, `type:folder` or `in:C:\Demo` to narrow results. `*` and `?` are wildcards; `regex:` enables the supported basic expressions.
 
 Name, directory, size and local modification time are shown by default; folder size cells are empty. Headers sort the complete result set; the optional type column is in Search. Older indexes backfill timestamps in the background, and unavailable metadata shows “—”. Scrolling loads subsequent results with a bounded cache and disk checkpoints.
