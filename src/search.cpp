@@ -810,6 +810,7 @@ public:
         volume.rootFrn=(static_cast<uint64_t>(information.nFileIndexHigh)<<32)|information.nFileIndexLow;
         if(!restoreMft(volume,journal)) beginMft(volume,journal);
         Statement count(database.value,"SELECT count(*) FROM ntfs_nodes WHERE root_id=?1");count.number(1,volume.id);if(count.row())volume.nodeCount=sqlite3_column_int64(count.value,0);
+        if(volume.phase==NtfsPhase::Journal)volume.materialDone=volume.nodeCount;
         if(volume.phase==NtfsPhase::Materialize&&!volume.materialFirst){Statement done(database.value,"SELECT count(*) FROM ntfs_nodes WHERE root_id=?1 AND frn<=?2");done.number(1,volume.id);done.number(2,volume.materialCursor);if(done.row())volume.materialDone=sqlite3_column_int64(done.value,0);}
         return true;
     }
@@ -1197,8 +1198,14 @@ public:
             }
             upsert(database.value,scan.rootId,path,item.name,item.attributes,item.size,scan.stamp,item.frn,true,item.modified);
             if(auto* volume=root(scan.rootId);volume && volume->phase!=NtfsPhase::Directory) {
+                bool relocated=false;
+                if(item.attributes&FILE_ATTRIBUTE_DIRECTORY){
+                    auto& previous=*nodeReader;StatementUse use(previous);
+                    previous.number(1,scan.rootId);previous.number(2,(int64_t)item.frn);
+                    relocated=!previous.row()||static_cast<uint64_t>(sqlite3_column_int64(previous.value,0))!=scan.directory->parentFrn||wide(sqlite3_column_text(previous.value,1))!=item.name;
+                }
                 node(scan.rootId,item.frn,scan.directory->parentFrn,item.name,(item.attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,scan.stamp,item.attributes);
-                volume->clearCache();
+                if(relocated)volume->clearCache();
             }
             if(item.attributes&FILE_ATTRIBUTE_DIRECTORY) {
                 if(nameSurrogatePath(path,item.attributes)) ++reparse;
