@@ -2,6 +2,7 @@
 #include "clipboard.hpp"
 #include "search.hpp"
 #include "index_status.hpp"
+#include "index_launch.hpp"
 #include "capture.hpp"
 #include "translation.hpp"
 #include "settings.hpp"
@@ -1786,30 +1787,47 @@ class Application {
                 invalidate();
                 return;
             }
-            auto executable = executableDirectory() / L"DeskIndex.exe";
             auto parameters = L"--data \"" + data.wstring() + L"\" --parent " +
                               std::to_wstring(GetCurrentProcessId());
-            SHELLEXECUTEINFOW execute{sizeof(execute)};
-            execute.fMask = SEE_MASK_NOCLOSEPROCESS;
-            execute.hwnd = settingsWindow ? settingsWindow : window;
-            execute.lpVerb = L"runas";
-            execute.lpFile = executable.c_str();
-            execute.lpParameters = parameters.c_str();
-            execute.nShow = SW_HIDE;
-            if (ShellExecuteExW(&execute)) {
-                workerHandle = execute.hProcess;
-                config.elevatedIndex = true;
-                try {
-                    saveSettings(data / L"settings.json", config);
-                } catch (const std::exception &e) {
-                    status = L"管理员索引已启动，但偏好未保存：" + userError(e);
-                    invalidate();
-                    return;
+            try {
+                IndexExecutable executable(executableDirectory() / L"DeskIndex.exe");
+                SHELLEXECUTEINFOW execute{sizeof(execute)};
+                execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+                execute.hwnd = settingsWindow ? settingsWindow : window;
+                execute.lpVerb = L"runas";
+                execute.lpFile = executable.path().c_str();
+                execute.lpParameters = parameters.c_str();
+                execute.nShow = SW_HIDE;
+                if (ShellExecuteExW(&execute)) {
+                    workerHandle = execute.hProcess;
+                    const auto elevation = indexProcessElevation(workerHandle);
+                    if (elevation != ProcessElevation::Elevated) {
+                        status = elevation == ProcessElevation::Standard
+                            ? L"索引进程仍为普通权限，请在设置中重新请求管理员索引"
+                            : L"索引进程已启动，但无法确认管理员权限，请查看索引与运行状态";
+                        invalidate();
+                        return;
+                    }
+                    config.elevatedIndex = true;
+                    try {
+                        saveSettings(data / L"settings.json", config);
+                    } catch (const std::exception &e) {
+                        status = L"管理员索引已启动，但偏好未保存：" + userError(e);
+                        invalidate();
+                        return;
+                    }
+                    status = L"管理员索引已启动，继续已保存的构建进度";
+                } else {
+                    const DWORD error = GetLastError();
+                    launchWorker();
+                    status = error == ERROR_CANCELLED
+                        ? L"已取消 Windows 管理员确认，按普通权限继续索引"
+                        : L"管理员索引启动失败（Windows " + std::to_wstring(error) +
+                          L"），按普通权限继续；可在设置中重试";
                 }
-                status = L"已启动索引辅助程序，当前覆盖范围会在文件页显示";
-            } else {
-                status = L"未启用管理员索引，继续使用普通目录模式";
+            } catch (const std::exception& error) {
                 launchWorker();
+                status = L"管理员索引启动失败，按普通权限继续：" + userError(error);
             }
         }
         if(resultEdit&&mode==2&&(r->type==7||r->type==8||r->type==21||r->type==22))SetWindowTextW(resultEdit,detailText.c_str());

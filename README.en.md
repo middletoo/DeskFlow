@@ -39,7 +39,7 @@ Keep databases, history attachments, settings and the index in a dedicated folde
 
 Hover over an entry to see its current shortcut; change keys in Tools → Settings. Closing the main window returns to the tray; use the tray menu to exit. Settings also offers startup after signing into Windows.
 
-Fresh installations request administrator privileges for the **index worker** by default, while the main UI retains normal privileges. Existing explicit preferences are preserved and can be changed in Settings. Canceling UAC falls back to the current permissions. Existing results remain searchable during initial indexing; see Tools → Index and runtime status for coverage and progress.
+Fresh installations request administrator privileges for the **index worker** by default, while the main UI retains normal privileges. Existing explicit preferences are preserved and can be changed in Settings. Canceling UAC falls back to the current permissions. Version 0.3.8 resolves redirected install paths for elevation and checks the worker's actual privileges. Existing results remain searchable during initial indexing; see Tools → Index and runtime status for coverage and progress.
 
 ## Screenshots
 

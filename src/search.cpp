@@ -1,5 +1,6 @@
 #include "search.hpp"
 #include "index_pacing.hpp"
+#include "usn_batch.hpp"
 #include "sqlite3.h"
 #include <winioctl.h>
 #include <sddl.h>
@@ -1096,8 +1097,10 @@ public:
                 int64_t next=0;memcpy(&next,journalBuffer.data(),sizeof(next));
                 Transaction transaction(database.value);
                 bool changed=false;
-                bool valid=search_detail::visitUsnRecords(journalBuffer.data()+sizeof(USN),length-sizeof(USN),[&](uint64_t file,uint64_t parent,int64_t stamp,DWORD reason,DWORD attributes,const std::wstring& name) {changed=journalChange(volume,file,parent,stamp,reason,attributes,name)||changed;});
+                search_detail::UsnMetadataBatch updates([&](uint64_t file,uint64_t parent,int64_t stamp,DWORD reason,DWORD attributes,const std::wstring& name) {changed=journalChange(volume,file,parent,stamp,reason,attributes,name)||changed;});
+                bool valid=search_detail::visitUsnRecords(journalBuffer.data()+sizeof(USN),length-sizeof(USN),[&](uint64_t file,uint64_t parent,int64_t stamp,DWORD reason,DWORD attributes,const std::wstring& name) {updates.add(file,parent,stamp,reason,attributes,name);});
                 if(valid) {
+                    updates.flush();
                     // Own DB/WAL records advance the in-memory cursor without
                     // another checkpoint write that would generate more USN records.
                     if(changed && next!=volume.nextUsn) {

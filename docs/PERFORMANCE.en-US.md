@@ -4,6 +4,12 @@
 
 [简体中文](PERFORMANCE.md) · [Project overview](../README.en.md)
 
+## 0.3.8: restart and administrator indexing
+
+When Windows redirects the install directory, elevation uses the physical executable path to avoid access-denied failures through the logical path. The app checks the launched process token before reporting administrator indexing. UAC cancellation, launch failures and unverified privileges have explicit status messages. Existing databases and build checkpoints are retained; upgrading does not intentionally rebuild the index. Windows UAC still requires user confirmation.
+
+Within one USN read, repeated content, timestamp and close notifications for the same ordinary file are combined into one update. Create, delete, rename, hardlink and directory events remain ordering barriers. This avoids duplicate metadata reads and database writes without dropping real namespace changes.
+
 ## 0.3.7: initial construction and live updates
 
 Fixed mismatched outer-loop and SQLite CPU budgets: the inner callback previously kept the daily-maintenance throttle during initial construction. Native writes now supply derived fields on insertion, avoiding redundant row updates. Construction uses a bounded 32 MiB page cache and normal I/O priority, restoring a 4 MiB cache and background priority afterward. Initial CPU has a one-core ceiling; daily maintenance keeps its 0.5%-of-machine, quarter-core budget.
