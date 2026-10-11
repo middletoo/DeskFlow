@@ -297,6 +297,7 @@ class Application {
     bool showOriginal = false;
     Tasks queryTasks, indexStatusTasks, previewTasks, clipboardReaderTasks, clipboardTasks, ocrTasks;
     std::atomic<bool> indexStatusQueued=false;
+    int64_t observedIndexRevision=-1;
     std::atomic_size_t pendingClipboardBytes{0};
     std::wstring recordingWarning, hotkeyWarning;
     std::wstring historyFailure, searchFailure;
@@ -1649,9 +1650,14 @@ class Application {
                 detailText.clear();if (previewImage) DeleteObject(previewImage);previewImage = nullptr;
             } else if (r->listAction != 2 && r->listAction != 3) preview();
         } else if (r->type == 28) {
-            const bool changed=indexStatus.revision!=r->index.revision;
+            const bool changed=observedIndexRevision!=r->index.revision;
             indexStatusQueued=false;indexStatus=r->index;
-            if(changed&&mode==0&&IsWindowVisible(window)&&!pendingQuery)query(false,true);
+            // Query results and status reads use different snapshots. Only
+            // acknowledge a revision when its refresh can actually start;
+            // changes arriving during an in-flight query must remain pending.
+            if(changed&&mode==0&&IsWindowVisible(window)&&!pendingQuery&&!listInFlight){
+                observedIndexRevision=r->index.revision;query(false,true);
+            }
         } else if (r->type == 26) {
             if (r->generation != generation || r->listRequest != listRequest) return;
             listInFlight = false;

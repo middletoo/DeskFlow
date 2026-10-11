@@ -394,9 +394,13 @@ void upsert(sqlite3* db, int64_t rootId, const std::wstring& path, const std::ws
 }
 std::wstring subtreePrefix(const std::wstring& path) { return fold(path) + (path.back() == L'\\' ? L"" : L"\\"); }
 void erase(sqlite3* db, int64_t rootId, const std::wstring& path) {
-    Statement statement(db, "DELETE FROM files WHERE root_id=?1 AND (path_fold=?2 OR (path_fold>=?3 AND path_fold<?4))");
+    // OR made SQLite seek only root_id, visiting the entire volume for each
+    // deletion/rename. Separate seeks retain both parts of the path index.
+    Statement exact(db,"DELETE FROM files WHERE root_id=?1 AND path_fold=?2");
+    exact.number(1,rootId);exact.text(2,fold(path));exact.run();
+    Statement statement(db, "DELETE FROM files WHERE root_id=?1 AND path_fold>=?3 AND path_fold<?4");
     auto prefix = subtreePrefix(path), upper = prefix; upper.back() = L']';
-    statement.number(1, rootId); statement.text(2, fold(path)); statement.text(3, prefix); statement.text(4, upper); statement.run();
+    statement.number(1, rootId);statement.text(3, prefix); statement.text(4, upper); statement.run();
 }
 void eraseDescendants(sqlite3* db,int64_t rootId,const std::wstring& path) {
     Statement statement(db,"DELETE FROM files WHERE root_id=?1 AND path_fold>=?2 AND path_fold<?3");
@@ -404,9 +408,11 @@ void eraseDescendants(sqlite3* db,int64_t rootId,const std::wstring& path) {
     statement.number(1,rootId);statement.text(2,prefix);statement.text(3,upper);statement.run();
 }
 void protect(sqlite3* db, int64_t rootId, const std::wstring& path, int64_t stamp) {
-    Statement statement(db, "UPDATE files SET seen=max(seen,?5) WHERE root_id=?1 AND (path_fold=?2 OR (path_fold>=?3 AND path_fold<?4))");
+    Statement exact(db,"UPDATE files SET seen=max(seen,?3) WHERE root_id=?1 AND path_fold=?2");
+    exact.number(1,rootId);exact.text(2,fold(path));exact.number(3,stamp);exact.run();
+    Statement statement(db, "UPDATE files SET seen=max(seen,?5) WHERE root_id=?1 AND path_fold>=?3 AND path_fold<?4");
     auto prefix = subtreePrefix(path), upper = prefix; upper.back() = L']';
-    statement.number(1, rootId); statement.text(2, fold(path)); statement.text(3, prefix); statement.text(4, upper); statement.number(5, stamp); statement.run();
+    statement.number(1, rootId);statement.text(3, prefix); statement.text(4, upper); statement.number(5, stamp); statement.run();
 }
 
 // A small Thompson-style matcher keeps regex work cancellable and linear in
@@ -988,7 +994,7 @@ public:
             if(oldPath) erase(database.value,volume.id,*oldPath);
             Statement removeFiles(database.value,"DELETE FROM files WHERE root_id=?1 AND frn=?2");removeFiles.number(1,volume.id);removeFiles.number(2,static_cast<int64_t>(file));removeFiles.run();
             Statement removeNode(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1 AND frn=?2");removeNode.number(1,volume.id);removeNode.number(2,static_cast<int64_t>(file));removeNode.run();
-            volume.clearCache();return true;
+            if((attributes&FILE_ATTRIBUTE_DIRECTORY)||volume.pathCache.contains(file))volume.clearCache();return true;
         }
         if(reason&USN_REASON_RENAME_OLD_NAME) {
             // Enumeration may already contain the new name. Use the event's
@@ -998,7 +1004,7 @@ public:
             return true;
         }
         node(volume.id,file,parent,name,(attributes&FILE_ATTRIBUTE_DIRECTORY)!=0,stamp,attributes);
-        volume.clearCache();
+        if((attributes&FILE_ATTRIBUTE_DIRECTORY)||volume.pathCache.contains(file))volume.clearCache();
         auto newPath=nodePath(volume,file);
         if(oldPath && newPath && fold(*oldPath)!=fold(*newPath)) erase(database.value,volume.id,*oldPath);
         materialize(volume,file,stamp);
@@ -1121,9 +1127,12 @@ public:
                     // USN replay handles deletion and rename during the build.
                     auto* nativeVolume=root(scan.rootId);
                     const bool nativeSnapshot=nativeVolume&&nativeVolume->phase==NtfsPhase::Journal&&nativeVolume->initialNative;
-                    Statement cleanup(database.value,"DELETE FROM files WHERE root_id=?1 AND seen<?2 AND (path_fold=?3 OR (path_fold>=?4 AND path_fold<?5)) AND (?6=0 OR frn IS NULL OR seen<?6 OR NOT EXISTS(SELECT 1 FROM ntfs_nodes WHERE ntfs_nodes.root_id=files.root_id AND ntfs_nodes.frn=files.frn))");
                     auto prefix=subtreePrefix(scan.prefix),upper=prefix;upper.back()=L']';
+                    for(const auto* range:{"path_fold=?3","path_fold>=?4 AND path_fold<?5"}){
+                    const auto sql=std::string("DELETE FROM files INDEXED BY sqlite_autoindex_files_1 WHERE root_id=?1 AND seen<?2 AND ")+range+" AND (?6=0 OR frn IS NULL OR seen<?6 OR NOT EXISTS(SELECT 1 FROM ntfs_nodes WHERE ntfs_nodes.root_id=files.root_id AND ntfs_nodes.frn=files.frn))";
+                    Statement cleanup(database.value,sql.c_str());
                     cleanup.number(1,scan.rootId); cleanup.number(2,scan.stamp); cleanup.text(3,fold(scan.prefix)); cleanup.text(4,prefix); cleanup.text(5,upper);cleanup.number(6,nativeSnapshot?nativeVolume->buildStamp:0);cleanup.run();
+                    }
                     Statement finish(database.value,"DELETE FROM scan_jobs WHERE id=?1"); finish.number(1,scan.id);finish.run();
                     if(auto* volume=root(scan.rootId);volume && fold(scan.prefix)==fold(volume->path)) {
                         if(volume->phase==NtfsPhase::Directory || volume->phase==NtfsPhase::Journal) {

@@ -45,6 +45,12 @@ int main() {
                     "resumed directory scan did not finish");
             require(scalar(index.database.value,"SELECT count(*) FROM files")==2402,
                     "resumed scan missed files or folders");
+            size_t steps=0;
+            sqlite3_progress_handler(index.database.value,1,[](void* raw){++*static_cast<size_t*>(raw);return 0;},&steps);
+            desk::erase(index.database.value,index.roots.front().id,(root/L"missing-file.txt").wstring());
+            desk::protect(index.database.value,index.roots.front().id,(root/L"missing-folder").wstring(),desk::epoch());
+            sqlite3_progress_handler(index.database.value,0,nullptr,nullptr);
+            require(steps<512,"missing-path delete/protection scanned the entire indexed root");
         }
         USN_JOURNAL_DATA_V0 journal{};
         journal.UsnJournalID=77;journal.FirstUsn=10;journal.NextUsn=200;

@@ -52,7 +52,12 @@ int main(int argc,char** argv){
         SetWindowTextW(app.edit,L"");KillTimer(hwnd,1);app.query(true);
         pumpUntil([&]{return !app.pendingQuery&&!app.listInFlight&&app.fileRows.size()==1;},"initial modified-time list timed out");
         app.select(0);SetTimer(hwnd,2,250,nullptr);
+        app.listInFlight=true;
         update("INSERT INTO files(root_id,path,path_fold,name,name_fold,folder,size,size_known,seen,modified) VALUES(97,'c:\\synthetic\\newest.txt','c:\\synthetic\\newest.txt','newest.txt','newest.txt',0,1,1,1,200);");
+        const auto blockedUntil=GetTickCount64()+650;
+        pumpUntil([&]{return GetTickCount64()>=blockedUntil;});
+        require(app.fileRows.size()==1,"live refresh replaced an in-flight query");
+        app.listInFlight=false;
         pumpUntil([&]{return !app.listInFlight&&app.fileRows.size()==2&&app.fileRows.front().name==L"newest.txt";},"newest file did not appear through the live timer");
         require(app.selected>=0&&app.fileRows[app.selected].name==L"older.txt","live insertion lost the user's selected file");
         update("UPDATE files SET modified=300 WHERE name='older.txt'");
