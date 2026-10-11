@@ -308,6 +308,7 @@ struct Database {
             "CREATE INDEX IF NOT EXISTS nodes_by_parent ON ntfs_nodes(root_id,parent_frn);"
             "CREATE TABLE IF NOT EXISTS scan_jobs(id INTEGER PRIMARY KEY,root_id INTEGER NOT NULL,prefix TEXT NOT NULL,stamp INTEGER NOT NULL,dirty INTEGER NOT NULL DEFAULT 0);"
             "CREATE TABLE IF NOT EXISTS scan_queue(id INTEGER PRIMARY KEY,job_id INTEGER NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,UNIQUE(job_id,path_key));"
+            "CREATE INDEX IF NOT EXISTS scan_queue_by_job_id ON scan_queue(job_id,id);"
             "CREATE TABLE IF NOT EXISTS ntfs_refresh(root_id INTEGER NOT NULL,frn INTEGER NOT NULL,stamp INTEGER NOT NULL,PRIMARY KEY(root_id,frn)) WITHOUT ROWID;"
         );
         auto ensureColumn=[&](const char* table,const char* column,const char* declaration) {
@@ -651,6 +652,7 @@ public:
     uint64_t initialRead=0;
     uint64_t pathStarted=0,pathStartDone=0;
     bool buildCache=false;
+    size_t nativeTurn=0;
     explicit Indexer(const fs::path& data) : database(data,4096),dataPath(normalize(data.wstring())) {
         ownDataAliases.push_back(fold(dataPath));
         auto physical=finalDirectory(dataPath);
@@ -774,6 +776,9 @@ public:
     }
     bool initialMft() const {
         return std::any_of(roots.begin(),roots.end(),[](const auto& volume){return volume.phase==NtfsPhase::Enumerate||volume.phase==NtfsPhase::Materialize||volume.initialNative;});
+    }
+    bool nativeNamesPending()const{
+        return std::any_of(roots.begin(),roots.end(),[](const auto& volume){return volume.phase==NtfsPhase::Enumerate||volume.phase==NtfsPhase::Materialize;});
     }
     void buildResources(bool building){
         if(building==buildCache)return;
@@ -933,8 +938,8 @@ public:
         Statement insert(database.value,"INSERT INTO ntfs_refresh VALUES(?1,?2,?3) ON CONFLICT(root_id,frn) DO UPDATE SET stamp=max(stamp,excluded.stamp)");
         insert.number(1,volume.id);insert.number(2,static_cast<int64_t>(file));insert.number(3,stamp);insert.run();
     }
-    bool refreshBatch() {
-        Statement queued(database.value,"SELECT q.root_id,q.frn,q.stamp FROM ntfs_refresh q JOIN search_roots s ON s.id=q.root_id WHERE s.build_phase<>'enumerate' ORDER BY q.root_id,q.frn LIMIT 128");
+    bool refreshBatch(size_t limit=128) {
+        Statement queued(database.value,("SELECT root_id,frn,stamp FROM ntfs_refresh WHERE root_id IN(SELECT id FROM search_roots WHERE build_phase<>'enumerate') ORDER BY root_id,frn LIMIT "+std::to_string(std::min<size_t>(limit,128))).c_str());
         struct Pending {int64_t root,frn,stamp;};std::vector<Pending> batch;
         while(queued.row()) batch.push_back({sqlite3_column_int64(queued.value,0),sqlite3_column_int64(queued.value,1),sqlite3_column_int64(queued.value,2)});
         if(batch.empty()) return false;
@@ -1017,8 +1022,10 @@ public:
     }
     bool ntfsBatch() {
         bool working=false;
-        for(auto& volume:roots) {
-            if(volume.phase==NtfsPhase::Directory) continue;
+        const bool enumerating=std::any_of(roots.begin(),roots.end(),[](const auto& volume){return volume.phase==NtfsPhase::Enumerate;});
+        for(size_t attempt=0;attempt<roots.size();++attempt) {
+            auto& volume=roots[nativeTurn++%roots.size()];
+            if(volume.phase==NtfsPhase::Directory||volume.phase==NtfsPhase::Journal||(enumerating&&volume.phase==NtfsPhase::Materialize)) continue;
             DWORD length=0;
             if(volume.phase==NtfsPhase::Enumerate) {
                 working=true;
@@ -1048,7 +1055,7 @@ public:
                 if(!valid) directoryFallback(volume);
             } else if(volume.phase==NtfsPhase::Materialize) {
                 working=true;
-                Statement nodes(database.value,volume.materialFirst?"SELECT frn FROM ntfs_nodes WHERE root_id=?1 ORDER BY frn LIMIT 512":"SELECT frn FROM ntfs_nodes WHERE root_id=?1 AND frn>?2 ORDER BY frn LIMIT 512");
+                Statement nodes(database.value,volume.materialFirst?"SELECT frn FROM ntfs_nodes WHERE root_id=?1 ORDER BY frn LIMIT 2048":"SELECT frn FROM ntfs_nodes WHERE root_id=?1 AND frn>?2 ORDER BY frn LIMIT 2048");
                 nodes.number(1,volume.id);if(!volume.materialFirst)nodes.number(2,volume.materialCursor);
                 std::vector<uint64_t> pending;while(nodes.row()) pending.push_back(static_cast<uint64_t>(sqlite3_column_int64(nodes.value,0)));
                 if(pending.empty()) {
@@ -1067,6 +1074,7 @@ public:
                     checkpointMft(volume);transaction.commit();
                 }
             }
+            return working;
         }
         return working;
     }
@@ -1105,8 +1113,15 @@ public:
         return working;
     }
     bool scanBatch() {
+        const bool namesPending=nativeNamesPending();
+        if(active&&namesPending){
+            auto* volume=root(active->rootId);
+            if(volume&&fold(active->prefix)==fold(volume->path)){
+                pausedScans.emplace(active->id,std::move(*active));active.reset();
+            }
+        }
         if (!active) {
-            Statement first(database.value,"SELECT id,root_id,prefix,stamp FROM scan_jobs ORDER BY (id<=?1),id LIMIT 1");first.number(1,lastScanJob);
+            Statement first(database.value,"SELECT j.id,j.root_id,j.prefix,j.stamp FROM scan_jobs j JOIN search_roots r ON r.id=j.root_id WHERE ?2=0 OR j.prefix<>r.path ORDER BY (j.id<=?1),j.id LIMIT 1");first.number(1,lastScanJob);first.number(2,namesPending);
             if (!first.row()) return false;
             Scan scan; scan.id=sqlite3_column_int64(first.value,0); scan.rootId=sqlite3_column_int64(first.value,1); scan.prefix=wide(sqlite3_column_text(first.value,2)); scan.stamp=sqlite3_column_int64(first.value,3);
             auto retained=pausedScans.find(scan.id);
@@ -1126,7 +1141,7 @@ public:
                     // cannot expose them. Keep this build's native records;
                     // USN replay handles deletion and rename during the build.
                     auto* nativeVolume=root(scan.rootId);
-                    const bool nativeSnapshot=nativeVolume&&nativeVolume->phase==NtfsPhase::Journal&&nativeVolume->initialNative;
+                    const bool nativeSnapshot=nativeVolume&&nativeVolume->phase!=NtfsPhase::Directory&&nativeVolume->initialNative;
                     auto prefix=subtreePrefix(scan.prefix),upper=prefix;upper.back()=L']';
                     for(const auto* range:{"path_fold=?3","path_fold>=?4 AND path_fold<?5"}){
                     const auto sql=std::string("DELETE FROM files INDEXED BY sqlite_autoindex_files_1 WHERE root_id=?1 AND seen<?2 AND ")+range+" AND (?6=0 OR frn IS NULL OR seen<?6 OR NOT EXISTS(SELECT 1 FROM ntfs_nodes WHERE ntfs_nodes.root_id=files.root_id AND ntfs_nodes.frn=files.frn))";
@@ -1138,8 +1153,10 @@ public:
                         if(volume->phase==NtfsPhase::Directory || volume->phase==NtfsPhase::Journal) {
                             Statement complete(database.value,"UPDATE search_roots SET complete=1 WHERE id=?1");complete.number(1,scan.rootId);complete.run();
                         }
-                        Statement oldNodes(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1 AND seen<?2 AND frn<>?3 AND NOT EXISTS(SELECT 1 FROM files WHERE files.root_id=ntfs_nodes.root_id AND files.frn=ntfs_nodes.frn)");
-                        oldNodes.number(1,scan.rootId);oldNodes.number(2,scan.stamp);oldNodes.number(3,static_cast<int64_t>(volume->rootFrn));oldNodes.run();
+                        if(volume->phase==NtfsPhase::Directory||volume->phase==NtfsPhase::Journal){
+                            Statement oldNodes(database.value,"DELETE FROM ntfs_nodes WHERE root_id=?1 AND seen<?2 AND frn<>?3 AND NOT EXISTS(SELECT 1 FROM files WHERE files.root_id=ntfs_nodes.root_id AND files.frn=ntfs_nodes.frn)");
+                            oldNodes.number(1,scan.rootId);oldNodes.number(2,scan.stamp);oldNodes.number(3,static_cast<int64_t>(volume->rootFrn));oldNodes.run();
+                        }
                     }
                     if(dirty) schedule(scan.rootId,scan.prefix);
                     if(nativeVolume&&fold(scan.prefix)==fold(nativeVolume->path))nativeVolume->initialNative=dirty;
@@ -2027,7 +2044,7 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
             bool urgent=indexer.journalBatch();
             sqlPacing.initialBuild=indexer.initialMft();
             bool working=indexer.ntfsBatch()||urgent;
-            working=indexer.refreshBatch() || working;
+            working=indexer.refreshBatch(indexer.nativeNamesPending()?16:128) || working;
             working=indexer.scanBatch() || working;
             working=search_detail::backfillShortGrams(indexer.database.value,256) || working;
             working=search_detail::prepareSortIndexes(indexer.database.value,256) || working;

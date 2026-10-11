@@ -95,6 +95,9 @@ int main() {
             index.node(volume.id,7,5,L"cloud-metadata",true,volume.buildStamp,
                        FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT);
             index.node(volume.id,8,7,L"unreadable-attributes.txt",false,volume.buildStamp);
+            index.schedule(volume.id,volume.path);
+            require(!index.scanBatch()&&scalar(index.database.value,"SELECT count(*) FROM ntfs_nodes")==3,
+                    "whole-root reconciliation ran before native name construction and could prune unfinished nodes");
             volume.enumCursor=512;index.checkpointMft(volume);
         }
         {
@@ -167,6 +170,17 @@ int main() {
             index.journalChange(volume,21,300,251,USN_REASON_FILE_CREATE,FILE_ATTRIBUTE_NORMAL,L"arrived.txt");
             require(!index.refreshBatch()&&scalar(index.database.value,"SELECT count(*) FROM ntfs_refresh")>0,
                     "a change with an unenumerated parent lost its durable retry");
+            {
+                desk::Transaction transaction(index.database.value);
+                desk::Statement pending(index.database.value,"INSERT INTO ntfs_refresh VALUES(?1,?2,1)");
+                for(int file=50000;file<60000;++file){desk::StatementUse use(pending);pending.number(1,volume.id);pending.number(2,file);pending.run();}
+                desk::execute(index.database.value,"INSERT INTO search_roots(id,path,path_key) VALUES(99,'c:\\synthetic-queue','c:\\synthetic-queue'); INSERT INTO ntfs_refresh VALUES(99,1,1);");
+                transaction.commit();
+                size_t steps=0;sqlite3_progress_handler(index.database.value,1,[](void* raw){++*static_cast<size_t*>(raw);return 0;},&steps);
+                require(index.refreshBatch(),"eligible updates waited behind an unenumerated root");
+                sqlite3_progress_handler(index.database.value,0,nullptr,nullptr);
+                require(steps<512,"refresh selection scanned the pending queue of an unenumerated root");
+            }
             index.node(volume.id,300,5,L"late-parent",true,snapshot);
             volume.phase=desk::NtfsPhase::Materialize;index.checkpointMft(volume);index.refreshBatch();
             require(reader.query(L"arrived").size()==1,

@@ -10,6 +10,8 @@ Fixed mismatched outer-loop and SQLite CPU budgets: the inner callback previousl
 
 Deletion, rename and inaccessible-directory protection now seek the exact path and subtree ranges. The previous OR predicate used only the root portion of the index and scanned every object in that volume for each event, blocking journal replay on large indexes. A regression check bounds the database work for missing paths. On the same approximately 793,000-row root, twelve alternating read-only missing-path samples measured a median of 187.28 ms for the old predicate and 0.029 ms for two bounded seeks. This lookup-only check excludes deleting existing rows and maintaining FTS.
 
+Raw MFT enumeration takes priority before path construction. Larger transactional path batches rotate between volumes; whole-root metadata/hardlink scans wait for native names to finish. Pending updates select eligible roots by key instead of scanning queues belonging to unenumerated volumes, and directory queues use an ordered index. These stages retain separate checkpoints.
+
 USN changes are processed during enumeration and path construction, with separate durable journal and build cursors. Creates, deletes, renames and modification-time changes no longer wait for the initial build to finish. The visible UI checks lightweight revision metadata every 250 ms and refreshes file queries when data changes while retaining scroll and selection state. Busy disks, OS calls and event backlogs can still increase latency; this is not a hard real-time guarantee.
 
 Local validation on 32 logical processors:
