@@ -1064,7 +1064,7 @@ class Application {
         if (interactive) SetFocus(edit);
         layout();
         SendMessageW(edit, EM_SETSEL, 0, -1);
-        SetTimer(window, 2, 1800, nullptr);
+        SetTimer(window, 2, 250, nullptr);
         query(true);
         invalidate();
     }
@@ -1206,7 +1206,7 @@ class Application {
             selected = scroll = fileAnchor = wheelRemainder = 0;listFocusedId = fileAnchorId = 0;pendingQuery = true;
             detailText.clear();if (previewImage) DeleteObject(previewImage);previewImage = nullptr;
             requestList(1, 0);
-        } else if (automatic && (listPages.front().number != 0 || scroll > visibleRows())) {
+        } else if (automatic && mode==1 && (listPages.front().number != 0 || scroll > visibleRows())) {
             requestList(5, 0);
         } else {
             ++previewGeneration;
@@ -1649,7 +1649,9 @@ class Application {
                 detailText.clear();if (previewImage) DeleteObject(previewImage);previewImage = nullptr;
             } else if (r->listAction != 2 && r->listAction != 3) preview();
         } else if (r->type == 28) {
+            const bool changed=indexStatus.revision!=r->index.revision;
             indexStatusQueued=false;indexStatus=r->index;
+            if(changed&&mode==0&&IsWindowVisible(window)&&!pendingQuery)query(false,true);
         } else if (r->type == 26) {
             if (r->generation != generation || r->listRequest != listRequest) return;
             listInFlight = false;
@@ -2370,7 +2372,7 @@ class Application {
                     app->query(true);
                 }
                 if (wp == 2 && IsWindowVisible(hwnd) && app->mode == 0){
-                    app->refreshIndexStatus();app->query(false, true);
+                    app->refreshIndexStatus();
                 }
                 if (wp == 9) {
                     PROCESS_MEMORY_COUNTERS_EX memory{};

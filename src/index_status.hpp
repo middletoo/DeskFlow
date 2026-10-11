@@ -20,6 +20,7 @@ inline std::wstring indexProgressLabel(const SearchStatus& status){
     if(!status.building)return status.stage==L"stopped"?L"索引未运行 · 覆盖尚未确认":L"正在准备索引";
     std::wstring result=status.stage==L"records"?L"读取文件记录":status.stage==L"paths"?L"建立可搜索路径":status.stage==L"changes"?L"校准建库期间的文件变化":L"校准目录与硬链接";
     if(status.stage==L"records")result+=L"（"+indexCountDigits(status.readRecords)+L"）";
+    if(status.stage==L"paths")result+=L"（"+indexCountDigits(status.materializedRecords)+L" / "+indexCountDigits(status.readRecords)+L"）";
     result+=L" · 已用 "+indexDuration(status.elapsedSeconds);
     if(status.estimatedStageSeconds>=0)result+=L" · 本阶段预计剩余 "+indexDuration(status.estimatedStageSeconds);
     else result+=L" · 剩余时间估算中";

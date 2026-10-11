@@ -1,8 +1,10 @@
 #define DESKFLOW_NO_ENTRYPOINT
 #include "../src/app.cpp"
+#include "sqlite3.h"
+namespace desk::search_detail {void registerShortGrams(sqlite3*);bool prepareSortIndexes(sqlite3*,size_t);}
 #include <iostream>
 static void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
-static void pumpUntil(const std::function<bool()>& done){auto end=GetTickCount64()+4000;while(!done()&&GetTickCount64()<end){MSG m{};while(PeekMessageW(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_QUIT){TranslateMessage(&m);DispatchMessageW(&m);}Sleep(5);}require(done(),"compact UI async operation timed out");}
+static void pumpUntil(const std::function<bool()>& done,const char* label="compact UI async operation timed out"){auto end=GetTickCount64()+4000;while(!done()&&GetTickCount64()<end){MSG m{};while(PeekMessageW(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_QUIT){TranslateMessage(&m);DispatchMessageW(&m);}Sleep(5);}require(done(),label);}
 static ClipPayload textPayload(){ClipPayload p;ClipFormat f;f.format=CF_UNICODETEXT;std::wstring value=L"Synthetic floating preview\r\n第二行测试内容";f.data.resize((value.size()+1)*2);memcpy(f.data.data(),value.c_str(),f.data.size());p.formats.push_back(std::move(f));p.source=L"Synthetic source";return p;}
 int main(int argc,char** argv){
     bool isolated=argc>1&&std::string(argv[1])=="--isolated-copy";
@@ -39,6 +41,29 @@ int main(int argc,char** argv){
         app.indexStatus.limited=true;
         require(indexEmptyLabel(app.indexStatus).find(L"受限")!=std::wstring::npos,"limited coverage must remain visible in empty results");
         if(!isolated){
+        sqlite3* writerRaw=nullptr;
+        require(sqlite3_open(utf8((directory/L"files.db").wstring()).c_str(),&writerRaw)==SQLITE_OK,"open isolated index writer");
+        std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(writerRaw,sqlite3_close);
+        desk::search_detail::registerShortGrams(writer.get());
+        auto update=[&](const char* sql){require(sqlite3_exec(writer.get(),sql,nullptr,nullptr,nullptr)==SQLITE_OK,"synthetic live index write failed");};
+        update("DELETE FROM files; INSERT OR IGNORE INTO search_roots(id,path,path_key) VALUES(97,'c:\\synthetic','c:\\synthetic'); INSERT INTO files(root_id,path,path_fold,name,name_fold,folder,size,size_known,seen,modified) VALUES(97,'c:\\synthetic\\older.txt','c:\\synthetic\\older.txt','older.txt','older.txt',0,1,1,1,100);");
+        while(desk::search_detail::prepareSortIndexes(writer.get(),512)){}
+        app.fileQuery.sort=desk::SearchSort::Modified;app.fileQuery.descending=true;
+        SetWindowTextW(app.edit,L"");KillTimer(hwnd,1);app.query(true);
+        pumpUntil([&]{return !app.pendingQuery&&!app.listInFlight&&app.fileRows.size()==1;},"initial modified-time list timed out");
+        app.select(0);SetTimer(hwnd,2,250,nullptr);
+        update("INSERT INTO files(root_id,path,path_fold,name,name_fold,folder,size,size_known,seen,modified) VALUES(97,'c:\\synthetic\\newest.txt','c:\\synthetic\\newest.txt','newest.txt','newest.txt',0,1,1,1,200);");
+        pumpUntil([&]{return !app.listInFlight&&app.fileRows.size()==2&&app.fileRows.front().name==L"newest.txt";},"newest file did not appear through the live timer");
+        require(app.selected>=0&&app.fileRows[app.selected].name==L"older.txt","live insertion lost the user's selected file");
+        update("UPDATE files SET modified=300 WHERE name='older.txt'");
+        pumpUntil([&]{return !app.listInFlight&&app.fileRows.front().name==L"older.txt";},"modified file did not reorder through the live timer");
+        update("DELETE FROM files WHERE name='newest.txt'");
+        pumpUntil([&]{return !app.listInFlight&&app.fileRows.size()==1&&app.fileRows.front().name==L"older.txt";},"deleted file remained in the live list");
+        const auto stableGeneration=app.generation.load();
+        auto idleUntil=GetTickCount64()+700;
+        pumpUntil([&]{return GetTickCount64()>=idleUntil;});
+        require(app.generation==stableGeneration,"unchanged index reran full queries during idle polling");
+        KillTimer(hwnd,2);writer.reset();
         app.history->append(textPayload());ClipPayload opaque;opaque.source=L"Synthetic opaque source";opaque.formats.push_back({0xc001,L"Synthetic private format",{1,2,3}});app.history->append(opaque);
         app.mode=1;app.layout();app.query(true);pumpUntil([&]{return !app.pendingQuery&&!app.listInFlight&&app.historyRows.size()==2;});
         require(!IsWindowVisible(app.floatingPreview.window()),"loading clipboard history must not automatically open a permanent preview");

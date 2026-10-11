@@ -33,11 +33,12 @@ struct SearchQuery {
 };
 struct SearchStatus {
     int64_t total = 0;
+    int64_t revision = 0;
     bool building = false;
     std::wstring message;
     bool complete = false, limited = false;
     int roots = 0, completedRoots = 0;
-    int64_t readRecords = 0, estimatedRecords = 0, elapsedSeconds = 0, estimatedStageSeconds = -1;
+    int64_t readRecords = 0, materializedRecords = 0, estimatedRecords = 0, elapsedSeconds = 0, estimatedStageSeconds = -1;
     std::wstring stage;
 };
 class SearchStore {

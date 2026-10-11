@@ -4,6 +4,23 @@
 
 [简体中文](PERFORMANCE.md) · [Project overview](../README.en.md)
 
+## 0.3.7: initial construction and live updates
+
+Fixed mismatched outer-loop and SQLite CPU budgets: the inner callback previously kept the daily-maintenance throttle during initial construction. Native writes now supply derived fields on insertion, avoiding redundant row updates. Construction uses a bounded 32 MiB page cache and normal I/O priority, restoring a 4 MiB cache and background priority afterward. Initial CPU has a one-core ceiling; daily maintenance keeps its 0.5%-of-machine, quarter-core budget.
+
+USN changes are processed during enumeration and path construction, with separate durable journal and build cursors. Creates, deletes, renames and modification-time changes no longer wait for the initial build to finish. The visible UI checks lightweight revision metadata every 250 ms and refreshes file queries when data changes while retaining scroll and selection state. Busy disks, OS calls and event backlogs can still increase latency; this is not a hard real-time guarantee.
+
+Local validation on 32 logical processors:
+
+| Workload | Result |
+| --- | ---: |
+| Old synthetic path construction, 20,400 objects, original pacing | 31.05 seconds |
+| New same-size synthetic workload, production FTS and sort indexes | 5.87 seconds |
+| Old running index, 20-second observation | About 102 rows/second |
+| New private index copy, 101,376 resumed objects | 34.26 seconds, about 2,959 rows/second |
+
+The synthetic workload measures path construction, excluding volume enumeration, directory/hardlink reconciliation and complete GUI latency. Live and copied-index conditions differ in caches, concurrent load and scope, so the last two rows are not a controlled A/B comparison. These measurements do not guarantee full-build duration or Everything-equivalent speed. Real filenames, paths and benchmark databases are never published.
+
 ## Version and index coverage
 
 Both measurement sets below come from pre-fix **0.3.3**. Fresh **0.3.4** installations request administrator indexing by default, preserve unfinished directory queues and MFT build checkpoints, and use USN monitoring on NTFS to reduce duplicate whole-volume reconciliations. Metadata enumeration privileges and reparse-directory classification expand coverage.

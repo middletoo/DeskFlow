@@ -121,6 +121,73 @@ int main() {
             require(!index.restoreMft(volume,journal),"different volume incorrectly reused an old checkpoint");
         }
         {
+            // Use the physical volume spelling: redirected Temp/AppData may
+            // be reached through a different drive, unlike a real MFT root.
+            const auto liveRoot=fs::path(desk::finalDirectory(base.wstring()))/L"live-build";fs::create_directories(liveRoot);
+            std::ofstream(liveRoot/L"newest.txt")<<"synthetic new file";
+            desk::Indexer index(base/L"live-build-data");index.initialize({liveRoot.wstring()});
+            auto& volume=index.roots.front();volume.rootFrn=5;volume.serial=123;index.beginMft(volume,journal);
+            const auto snapshot=volume.buildStamp;
+            index.node(volume.id,100,5,L"deleted.txt",false,snapshot);
+            index.materialize(volume,100,snapshot,false);
+            volume.phase=desk::NtfsPhase::Materialize;volume.materialFirst=false;volume.materialCursor=1000;
+            // The new ID is behind the durable build cursor; only live journal
+            // processing can make it visible before initial construction ends.
+            index.journalChange(volume,20,5,201,USN_REASON_FILE_CREATE,FILE_ATTRIBUTE_NORMAL,L"newest.txt");
+            desk::SearchStore reader(base/L"live-build-data");
+            desk::SearchQuery recent;recent.sort=desk::SearchSort::Modified;recent.descending=true;
+            while(desk::search_detail::prepareSortIndexes(index.database.value,512)){}
+            auto hits=reader.query(recent);
+            require(!hits.empty()&&hits.front().name==L"newest.txt"&&hits.front().modified>0,
+                    "new file did not become searchable with current modification time during the initial build");
+            index.node(volume.id,20,5,L"stale-enumerated-name.txt",false,snapshot);
+            volume.clearCache();
+            require(reader.query(L"newest").size()==1&&index.nodePath(volume,20)==(liveRoot/L"newest.txt").wstring(),
+                    "older enumeration overwrote a live journal name");
+            const auto oldRevision=reader.status().revision;
+            index.journalChange(volume,100,5,202,USN_REASON_FILE_DELETE,FILE_ATTRIBUTE_NORMAL,L"deleted.txt");
+            require(reader.query(L"deleted").empty()&&reader.status().revision>oldRevision,
+                    "live deletion was not committed or did not notify readers");
+            index.materialize(volume,100,snapshot,false);
+            require(reader.query(L"deleted").empty(),"materialization resurrected a deleted node");
+            volume.nextUsn=250;index.checkpointMft(volume);
+            auto resumedJournal=journal;resumedJournal.FirstUsn=210;resumedJournal.NextUsn=300;
+            desk::Root restored;restored.id=volume.id;restored.path=liveRoot.wstring();restored.rootFrn=5;restored.serial=123;
+            require(index.restoreMft(restored,resumedJournal)&&restored.nextUsn==250&&restored.materialCursor==1000,
+                    "concurrent journal checkpoint did not preserve resumable build after old journal pages expired");
+            fs::create_directories(liveRoot/L"late-parent");
+            std::ofstream(liveRoot/L"late-parent"/L"arrived.txt")<<"synthetic late-parent event";
+            volume.phase=desk::NtfsPhase::Enumerate;index.checkpointMft(volume);
+            index.journalChange(volume,21,300,251,USN_REASON_FILE_CREATE,FILE_ATTRIBUTE_NORMAL,L"arrived.txt");
+            require(!index.refreshBatch()&&scalar(index.database.value,"SELECT count(*) FROM ntfs_refresh")>0,
+                    "a change with an unenumerated parent lost its durable retry");
+            index.node(volume.id,300,5,L"late-parent",true,snapshot);
+            volume.phase=desk::NtfsPhase::Materialize;index.checkpointMft(volume);index.refreshBatch();
+            require(reader.query(L"arrived").size()==1,
+                    "a new file behind the build cursor was missed when its parent arrived later");
+        }
+        {
+            const auto physical=desk::finalDirectory(base.wstring());require(!physical.empty(),"missing physical fixture root");
+            const auto linkRoot=fs::path(physical)/L"hardlink-events";fs::create_directories(linkRoot);
+            std::ofstream(linkRoot/L"primary.txt")<<"synthetic hardlink fixture";
+            auto identity=[](const fs::path& path){
+                desk::Handle h(CreateFileW(desk::extended(path.wstring()).c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr));
+                BY_HANDLE_FILE_INFORMATION info{};require(h&&GetFileInformationByHandle(h.value,&info),"cannot read synthetic file identity");
+                return (uint64_t(info.nFileIndexHigh)<<32)|info.nFileIndexLow;
+            };
+            desk::Indexer index(base/L"hardlink-data");index.initialize({linkRoot.wstring()});
+            auto& volume=index.roots.front();volume.rootFrn=identity(linkRoot);volume.serial=123;index.beginMft(volume,journal);volume.phase=desk::NtfsPhase::Journal;
+            const auto file=identity(linkRoot/L"primary.txt");
+            require(CreateHardLinkW((linkRoot/L"alias.txt").c_str(),(linkRoot/L"primary.txt").c_str(),nullptr)!=FALSE,"cannot create synthetic hardlink");
+            index.journalChange(volume,file,volume.rootFrn,201,USN_REASON_HARD_LINK_CHANGE,FILE_ATTRIBUTE_NORMAL,L"primary.txt");
+            for(int batch=0;batch<20&&index.scanBatch();++batch){}
+            desk::SearchStore reader(base/L"hardlink-data");
+            require(reader.query(L"alias").size()==1,"live hardlink creation was not indexed by enumeration or fallback");
+            fs::remove(linkRoot/L"alias.txt");
+            index.journalChange(volume,file,volume.rootFrn,202,USN_REASON_HARD_LINK_CHANGE,FILE_ATTRIBUTE_NORMAL,L"primary.txt");
+            require(reader.query(L"alias").empty()&&reader.query(L"primary").size()==1,"removed alias remained indexed or removed a surviving hardlink");
+        }
+        {
             desk::Indexer index(base/L"own-data");index.initialize({base.wstring()});
             auto& volume=index.roots.front();volume.rootFrn=5;volume.serial=321;
             index.beginMft(volume,journal);
