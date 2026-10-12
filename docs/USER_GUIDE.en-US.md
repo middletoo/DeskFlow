@@ -30,7 +30,7 @@ Hover over a top function entry to see its current hotkey. Change keys in Tools 
 
 ![File search](images/files.png)
 
-The lower-left total includes indexed files and folders, rather than matches for the current query. Initial builds show their stage and elapsed time. Remaining time during record reading and path construction is a measured stage estimate, not a fixed countdown. Results can be incomplete until path construction and directory reconciliation finish; empty results disclose this. Inaccessible or unresolved paths and unavailable roots are also reported, so a limited scan is not presented as full coverage. Initial NTFS work temporarily uses a higher processing budget; incremental updates retain the lower background CPU budget.
+The lower-left total includes files and folders. Version 0.4.0 administrator indexing reads NTFS names, hardlinks, sizes and times from the MFT, then builds fast orders and filename candidates. USN updates affected records. Restart reuses the snapshot and valid checkpoints; a journal gap rebuilds a trustworthy snapshot. Incomplete, unavailable and limited coverage are labeled.
 
 Press Alt+Q and enter a filename. Spaces combine terms with AND, for example `report 2026`. Names are matched by default; enable full-path matching in Search to include parent directories. Use `ext:pdf`, `ext:pdf;docx`, `type:folder` or `in:C:\Demo` to narrow results. `*` and `?` are wildcards; `regex:` enables the supported basic expressions.
 
@@ -42,7 +42,7 @@ Name, directory, size and local modification time are shown by default; folder s
 - Ctrl/Shift select multiple files; Ctrl+C/X copy/cut, F2 renames and Delete uses the Recycle Bin.
 - Use the Windows context menu or drag selected items out. Export and preview are in Search.
 
-The initial independent index builds in the background; existing entries remain searchable. See Tools → Index and runtime status. Fresh installations request administrator privileges for the index worker by default, with Windows UAC confirmation; the UI retains normal privileges. Canceling falls back to current permissions. Existing explicit settings remain in effect and can be changed in Settings. NTFS uses MFT/USN where available, with directory scanning as fallback. Unfinished builds resume after restart. Initial NTFS construction uses a separate CPU budget and a 32 MiB page cache, returning to 4 MiB afterward. USN changes are processed during construction; committed creates, deletes and modification-time changes refresh the visible list.
+The initial independent index builds in the background; existing entries remain searchable. See Tools → Index and runtime status. Fresh installations request administrator privileges for the index worker by default, with Windows UAC confirmation; the UI retains normal privileges. Canceling falls back to current permissions. Existing explicit settings remain in effect and can be changed in Settings. NTFS uses MFT/USN where available, with directory scanning as fallback. Unfinished builds resume after restart. Native construction uses a single compute thread and mapped catalog pages. USN changes are processed during construction; committed creates, deletes and modification-time changes refresh the visible list.
 
 ## Keep clipboard history
 
@@ -129,7 +129,7 @@ GIF has no audio; use MP4 for livestream sound. Recording streams to temporary s
 
 ## Data, backup and privacy
 
-Tools → Open data directory reveals the current user's storage. `history.db` plus `objects/` form the history; `files.db` is a rebuildable index. Updates preserve package-family storage. Back up into a new directory. Exit before restoring and preserve the old data directory; do not copy an actively written database. Encrypted attachments need a backup location supporting their file encryption.
+Tools → Open data directory reveals the current user's storage. `history.db` plus `objects/` form the history; `catalog.index`, `catalog.lookup` and `catalog.delta` form the native NTFS index; the old `files.db` remains available. Updates preserve package-family storage. Back up into a new directory. Exit before restoring and preserve the old data directory; do not copy an actively written database. Encrypted attachments need a backup location supporting their file encryption.
 
 The public repository excludes personal data, real history, API keys, private signing keys, validation backups and local development history. Screenshots show synthetic content on a private desktop. Actual system audio recordings are not published.
 

@@ -4,6 +4,32 @@
 
 [简体中文](PERFORMANCE.md) · [Project overview](../README.en.md)
 
+## 0.4.0: native NTFS catalog
+
+Administrator indexing now obtains long filenames, hardlink names, sizes and modification times directly from the MFT. Raw metadata reads and the file-record API are supported; volumes without trustworthy raw reads use the file-record API. USN changes update the affected files rather than scheduling whole-volume directory scans for hardlink changes.
+
+Names and metadata use a compact mapped snapshot with shared directory paths and prebuilt name, path, size, type, modification-time and ID orders. A compressed filename candidate index avoids scanning millions of names for sparse matches. Query continuations remain stable during writes. Checksummed update blocks support recovery and bounded log compaction; a lost journal checkpoint explicitly triggers a new trustworthy snapshot.
+
+Local validation on three NTFS volumes with about 6.88 million objects:
+
+| Measurement | Result |
+| --- | ---: |
+| Launch to completed main snapshot file | 151.49 s |
+| Separate filename lookup construction | 58.74 s |
+| Main snapshot size | 1,202,847,744 bytes |
+| Filename lookup size | 225,437,770 bytes |
+| Subsequent sorted queries for “AI 金融” | About 3–6 ms; 8 results |
+| Actual create, modify, delete, rename, directory move and hardlink updates | About 143–341 ms in this run |
+
+The two build stages were measured in separate invocations. Their roughly 210-second sum is an estimate, not one end-to-end measurement. The previous implementation was still traversing directories after 25 hours. All three volumes completed in this validation, with no unresolved paths reported. Coverage refers to the selected local NTFS volumes; offline and network locations are excluded. An Everything count that also contains overlapping folder indexes is not a comparable unique-object count.
+
+The first query in a new process, including loading updates, took about 332 ms. The subsequent millisecond measurements do not guarantee cold startup or every complex filter. Broad matches, path searches, regex and many updates can cost more.
+
+Mapped pages consume real system memory and working-set space. **Low private memory does not mean the same low total RAM cost.** The implementation no longer treats 80 MiB as a fixed ceiling for multimillion-object indexes. Usage depends on object count, names, orders and cached pages. Catalog construction uses one compute thread; file-record reads and media encoding have separate costs.
+
+Upgrades retain history, settings and the selected data folder. The old `files.db` remains available. Native indexing uses `catalog.index`, `catalog.lookup`, `catalog.delta` and `catalog.status`; directory indexing remains available for ordinary roots or insufficient privileges. Existing results remain available while the first native snapshot is built.
+
+
 ## 0.3.8: restart and administrator indexing
 
 When Windows redirects the install directory, elevation uses the physical executable path to avoid access-denied failures through the logical path. The app checks the launched process token before reporting administrator indexing. UAC cancellation, launch failures and unverified privileges have explicit status messages. Existing databases and build checkpoints are retained; upgrading does not intentionally rebuild the index. Windows UAC still requires user confirmation.

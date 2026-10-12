@@ -49,7 +49,9 @@ All screenshots use synthetic examples, excluding personal files and real clipbo
 
 ![File search](docs/images/files.png)
 
-The lower-left counter shows searchable indexed files and folders. Initial indexing reports record reading, path construction, directory/hardlink reconciliation and elapsed time; the record-reading and path-construction stages estimate their own remaining time from measured progress. Readiness is shown after coverage checks, and incomplete or limited empty results are labeled. Names are built first, metadata is filled through directory enumeration, and interrupted builds resume saved progress.
+The lower-left counter shows indexed files and folders. Initial indexing shows record reading and fast-index construction; readiness follows snapshot and journal validation. Incomplete or limited coverage is labeled, and restart reuses the saved snapshot and update checkpoints.
+
+Version 0.4.0 reads complete NTFS names, hardlinks, sizes and timestamps from the MFT, with a compact snapshot, compressed filename candidates and prebuilt sort orders. USN updates affected records without whole-volume directory rescans. Restart reuses the snapshot and update checkpoints.
 
 Name, directory, size and modification time are visible by default; folder sizes remain empty. Double-click a name to reveal a file or its directory to copy the full path. Global sorting, incremental scrolling, multi-selection, drag-out, Windows context menus, filters and export are available.
 

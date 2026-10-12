@@ -1,6 +1,7 @@
 #include "search.hpp"
 #include "index_pacing.hpp"
 #include "usn_batch.hpp"
+#include "native_catalog.hpp"
 #include "sqlite3.h"
 #include <winioctl.h>
 #include <sddl.h>
@@ -665,7 +666,7 @@ public:
     }
     bool ownIndexPath(const std::wstring& path) {
         auto leaf=fold(fs::path(path).filename().wstring());
-        if(leaf!=L"files.db" && leaf!=L"files.db-wal" && leaf!=L"files.db-shm" && leaf!=L"files.db-journal") return false;
+        if(leaf!=L"files.db" && leaf!=L"files.db-wal" && leaf!=L"files.db-shm" && leaf!=L"files.db-journal"&&!leaf.starts_with(L"catalog.")) return false;
         auto parent=normalize(fs::path(path).parent_path().wstring());
         auto key=fold(parent);
         if(std::find(ownDataAliases.begin(),ownDataAliases.end(),key)!=ownDataAliases.end()) return true;
@@ -1548,6 +1549,10 @@ struct SortInfo {
         auto direction=descending ? " ASC" : " DESC";
         return (grouped()?knownKey+" ASC,":std::string{})+key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
     }
+    std::string groupOrder(bool reverse=false) const {
+        auto direction=(descending!=reverse) ? " DESC" : " ASC";
+        return key+direction+(kind==SearchSort::Id ? std::string{} : ",f.id"+std::string(direction));
+    }
 };
 struct ParsedSearch {Bindings binds;std::string where="1";std::wstring fts,shortFts,error;bool regex=false;};
 std::wstring escapedGlob(const std::wstring& pattern) {std::wstring result;for(auto ch:pattern) result+=ch==L'[' ? L"[[]" : std::wstring(1,ch);return result;}
@@ -1653,11 +1658,72 @@ SearchItem itemRow(sqlite3_stmt* row) {
     SearchItem item;item.id=sqlite3_column_int64(row,0);item.name=wide(sqlite3_column_text(row,1));item.path=wide(sqlite3_column_text(row,2));item.folder=sqlite3_column_int(row,3)!=0;item.size=static_cast<uint64_t>(sqlite3_column_int64(row,4));item.sizeKnown=!item.folder && sqlite3_column_int(row,5)!=0;item.modified=(uint64_t)sqlite3_column_int64(row,6);return item;
 }
 std::string itemProjection(bool modifiedAvailable){return std::string("f.id,f.name,f.path,f.folder,f.size,f.size_known,")+(modifiedAvailable?"f.modified":"CAST(0 AS INTEGER)");}
+CatalogPredicate catalogPredicate(const SearchQuery& query,std::vector<std::string>* hints=nullptr){
+    struct Term {bool negate=false,path=false,wildcard=false;int kind=0;std::string value;std::vector<std::string> extensions;std::optional<BasicRegex> regex;};
+    std::vector<std::vector<Term>> groups;
+    auto preset=[](const std::wstring& key)->std::wstring{
+        if(key==L"pic"||key==L"image"||key==L"images")return L"jpg;jpeg;png;bmp;gif;webp;tif;tiff;ico;avif;heic;svg";
+        if(key==L"audio")return L"mp3;wav;flac;aac;ogg;m4a;wma;opus;aiff;ape";
+        if(key==L"video")return L"mp4;mkv;avi;mov;wmv;webm;m4v;mpg;mpeg;ts;flv";
+        if(key==L"doc"||key==L"document"||key==L"documents")return L"pdf;doc;docx;xls;xlsx;ppt;pptx;txt;rtf;md;odt;ods;odp;csv;html;htm";
+        if(key==L"exe"||key==L"executable")return L"exe;msi;bat;cmd;com;ps1;vbs";
+        if(key==L"zip"||key==L"archive")return L"zip;7z;rar;tar;gz;bz2;xz;cab;iso";return {};
+    };
+    for(const auto& group:orGroups(query.text)){
+        std::vector<Term> terms;
+        for(auto token:tokens(group)){
+            Term t;if(token.starts_with(L"!")&&token.size()>1){t.negate=true;token.erase(0,1);}
+            auto colon=token.find(L':');auto command=colon==std::wstring::npos?L"":fold(token.substr(0,colon));auto value=colon==std::wstring::npos?token:token.substr(colon+1);
+            auto extensions=[&](std::wstring list){t.kind=3;std::wstring part;for(auto c:list){if(c==L';'||c==L','){if(!part.empty()){if(part.front()==L'.')part.erase(0,1);t.extensions.push_back(utf8(fold(part)));part.clear();}}else part+=c;}
+                if(!part.empty()){if(part.front()==L'.')part.erase(0,1);t.extensions.push_back(utf8(fold(part)));}};
+            if(command==L"ext")extensions(value);
+            else if(command==L"type"){
+                auto kind=fold(value);if(kind==L"folder"||kind==L"folders")t.kind=2;
+                else if(kind==L"file"||kind==L"files")t.kind=1;
+                else{auto list=preset(kind);extensions(list.empty()?kind:list);}
+            }else if(command==L"file"||command==L"folder"){t.kind=command==L"file"?1:2;t.value=utf8(query.matchCase?value:fold(value));t.path=query.matchPath;}
+            else if(command==L"in"){t.kind=4;t.value=utf8(fold(normalize(value)));}
+            else if(command==L"regex"){
+                t.kind=5;t.path=query.matchPath;t.regex.emplace(query.matchCase?value:fold(value));if(!t.regex->valid)throw std::runtime_error("正则不支持分组、分支或反向引用");
+            }else if(auto list=preset(command);!list.empty()&&value.empty())extensions(list);
+            else{
+                auto shorthand=preset(fold(token));if(colon==std::wstring::npos&&!shorthand.empty()&&token.ends_with(L":"))extensions(shorthand);
+                else{t.path=command==L"path"||(command!=L"name"&&(query.matchPath||token.find_first_of(L"\\/")!=std::wstring::npos||(token.size()>1&&token[1]==L':'&&iswalpha(token[0]))));
+                    auto literal=command==L"path"||command==L"name"?value:token;t.wildcard=literal.find_first_of(L"*?")!=std::wstring::npos;t.value=utf8(query.matchCase?literal:fold(literal));if(t.wildcard)t.value=utf8(escapedGlob(query.matchCase?literal:fold(literal)));}
+            }
+            if(hints&&!t.negate&&!t.path&&(t.kind==0||t.kind==1||t.kind==2)&&!t.value.empty()){
+                auto pattern=wide((const unsigned char*)t.value.c_str());
+                if(t.wildcard)for(size_t at=0;(at=pattern.find(L"[[]",at))!=std::wstring::npos;++at)pattern.replace(at,3,L"[");
+                auto literal=t.wildcard?utf8(longestLiteral(pattern)):t.value;if(!literal.empty())hints->push_back(std::move(literal));
+            }
+            terms.push_back(std::move(t));
+        }
+        groups.push_back(std::move(terms));
+    }
+    if(hints&&groups.size()!=1)hints->clear();
+    return [groups=std::move(groups),matchCase=query.matchCase](const CatalogView& row){
+        std::optional<std::string> path,foldedPath;
+        auto field=[&](bool full)->std::string_view{if(!full)return matchCase?row.name:row.foldedName;if(!path)path=row.path();if(matchCase)return *path;if(!foldedPath)foldedPath=utf8(fold(wide((const unsigned char*)path->c_str())));return *foldedPath;};
+        for(const auto& group:groups){bool matches=true;
+            for(const auto& t:group){bool yes=true;
+                if(t.kind==1||t.kind==2)yes=row.folder==(t.kind==2);
+                if(t.kind==3){yes=false;if(!row.folder){auto dot=row.foldedName.rfind('.');auto ext=dot==std::string_view::npos||dot==0?std::string_view{}:row.foldedName.substr(dot+1);for(const auto& p:t.extensions)if(sqlite3_strglob(p.c_str(),std::string(ext).c_str())==0){yes=true;break;}}}
+                else if(t.kind==4){if(!path)path=row.path();if(!foldedPath)foldedPath=utf8(fold(wide((const unsigned char*)path->c_str())));auto root=t.value;yes=*foldedPath==root||(foldedPath->starts_with(root)&&(root.ends_with("\\")||foldedPath->size()>root.size()&&(*foldedPath)[root.size()]=='\\'));}
+                else if(t.kind==5){auto input=field(t.path);yes=t.regex->match(wide((const unsigned char*)std::string(input).c_str()),Clock::now()+std::chrono::milliseconds(50));}
+                else if(yes&&!t.value.empty()){auto input=field(t.path);yes=t.wildcard?sqlite3_strglob(t.value.c_str(),std::string(input).c_str())==0:input.find(t.value)!=std::string_view::npos;}
+                if(t.negate)yes=!yes;if(!yes){matches=false;break;}
+            }
+            if(matches)return true;
+        }
+        return false;
+    };
+}
 }
 
 struct SearchStore::Impl {
     fs::path directory;
     std::unique_ptr<Database> database;
+    std::unique_ptr<NativeCatalog> native;
     std::timed_mutex mutex;
     std::atomic<uint64_t> sequence=0;
     SearchStatus cached;
@@ -1677,6 +1743,7 @@ struct SearchStore::Impl {
     SortCursor sortedCursor;
     std::vector<SearchItem> sortedResults;
     explicit Impl(const fs::path& dataDirectory):directory(dataDirectory) {
+        native=std::make_unique<NativeCatalog>(directory);
         try {database=std::make_unique<Database>(directory,2048,true);sqlite3_busy_timeout(database->value,80);}
         catch(const std::exception& error) {cached.message=L"文件索引无法打开："+wide(reinterpret_cast<const unsigned char*>(error.what()));}
     }
@@ -1693,6 +1760,13 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
     std::vector<SearchItem> result;
     limit=std::min<size_t>(limit,1000);
     if(!limit)return result;
+    if(spec.text.size()>4096){impl_->queryMessage=L"搜索输入最长 4096 字符";return result;}
+    try{
+        if(impl_->native->available()){
+            std::vector<std::string> hints;auto predicate=catalogPredicate(spec,&hints);auto rows=impl_->native->query(spec,limit,predicate,hints);
+            impl_->pending=impl_->native->pending();return rows;
+        }
+    }catch(const std::exception& e){impl_->queryMessage=L"原生索引暂不可用："+wide((const unsigned char*)e.what());}
     if(!impl_->database){try{impl_->database=std::make_unique<Database>(impl_->directory,2048,true);}catch(const std::exception& e){impl_->queryMessage=L"文件索引暂不可用："+wide(reinterpret_cast<const unsigned char*>(e.what()));return result;}}
     if(spec.text.size()>4096) {impl_->queryMessage=L"搜索输入最长 4096 字符";return result;}
     sqlite3* db=impl_->database->value;
@@ -1770,7 +1844,7 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
                     auto start=sort.after(impl_->sortedCursor,boundaryBindings,false,false,sort.grouped());
                     if(sort.grouped()) start=sort.knownKey+"="+boundaryBindings.number(impl_->sortedKnownGroup)+" AND "+start;
                     auto projection=sort.key+",f.id,"+sort.knownKey;
-                    Statement boundary(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.order+" LIMIT 1 OFFSET "+std::to_string(impl_->sortedChunk-1)).c_str());boundaryBindings.bind(boundary);
+                    Statement boundary(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.groupOrder()+" LIMIT 1 OFFSET "+std::to_string(impl_->sortedChunk-1)).c_str());boundaryBindings.bind(boundary);
                     SortCursor end;
                     auto readCursor=[&](sqlite3_stmt* row) {
                         SortCursor value;value.valid=true;value.id=sqlite3_column_int64(row,1);value.known=sqlite3_column_int(row,2)!=0;
@@ -1778,7 +1852,7 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
                     };
                     if(boundary.row()) end=readCursor(boundary.value);
                     else {
-                        Statement last(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.reversedOrder()+" LIMIT 1").c_str());boundaryBindings.bind(last);
+                        Statement last(db,("SELECT "+projection+" FROM "+table+" WHERE "+start+" ORDER BY "+sort.groupOrder(true)+" LIMIT 1").c_str());boundaryBindings.bind(last);
                         if(!last.row()) {
                             if(sort.grouped() && impl_->sortedKnownGroup==1) {impl_->sortedKnownGroup=0;impl_->sortedCursor={};continue;}
                             break;
@@ -1787,7 +1861,7 @@ std::vector<SearchItem> SearchStore::query(const SearchQuery& spec,size_t limit)
                     }
                     auto binds=parsed.binds;auto lower=sort.after(impl_->sortedCursor,binds,false,false,sort.grouped()),upper=sort.after(end,binds,true,true,sort.grouped());
                     if(sort.grouped()) lower=sort.knownKey+"="+binds.number(impl_->sortedKnownGroup)+" AND "+lower;
-                    Statement rows(db,("SELECT "+projectionItems+" FROM "+table+" WHERE "+lower+" AND "+upper+" AND ("+parsed.where+") ORDER BY "+sort.order+" LIMIT "+std::to_string(limit-result.size())).c_str());
+                    Statement rows(db,("SELECT "+projectionItems+" FROM "+table+" WHERE "+lower+" AND "+upper+" AND ("+parsed.where+") ORDER BY "+sort.groupOrder()+" LIMIT "+std::to_string(limit-result.size())).c_str());
                     binds.bind(rows);collect(rows);impl_->sortedCursor=end;
                 }
             }
@@ -1818,6 +1892,9 @@ bool stopIndexWorker(const fs::path& directory) {
     } catch(...) {return false;}
 }
 std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit,int64_t beforeId) {
+    if(fs::exists(impl_->directory/L"catalog.index")&&!fs::exists(impl_->directory/L"catalog.disabled")){
+        SearchQuery spec;spec.text=text;spec.sort=SearchSort::Id;spec.descending=true;spec.matchPath=true;if(beforeId>0){SearchItem after;after.id=beforeId;spec.after=after;}return query(spec,limit);
+    }
     auto request=++impl_->sequence;
     std::unique_lock<std::timed_mutex> lock(impl_->mutex,std::defer_lock);
     if(!lock.try_lock_for(std::chrono::milliseconds(250))) return {};
@@ -1970,6 +2047,7 @@ std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit
 SearchStatus SearchStore::status() {
     std::unique_lock<std::timed_mutex> lock(impl_->mutex,std::defer_lock);
     if(!lock.try_lock_for(std::chrono::milliseconds(15))) {std::lock_guard cachedLock(impl_->cachedMutex);return impl_->cached;}
+    try{auto state=impl_->native->status();if(state.roots){std::lock_guard cachedLock(impl_->cachedMutex);impl_->cached=state;return state;}}catch(...){}
     if(!impl_->database) {std::lock_guard cachedLock(impl_->cachedMutex);return impl_->cached;}
     try {
         SearchStatus state;DWORD pid=0;
@@ -2021,6 +2099,15 @@ int indexWorkerMain(const fs::path& directory,const std::vector<std::wstring>& r
     try {
         // Metadata enumeration only; never change directory ACLs or ownership.
         enableBackupPrivilege();
+        bool nativeHandled=false;
+        do{
+            nativeHandled=runNativeCatalog(directory,roots,stop.value,parent.value);
+        }while(nativeHandled&&fs::exists(directory/L"catalog.rebuild")&&WaitForSingleObject(stop.value,0)!=WAIT_OBJECT_0&&(!parent||WaitForSingleObject(parent.value,0)!=WAIT_OBJECT_0));
+        if(nativeHandled){
+            SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_END);
+            SetConsoleCtrlHandler(consoleControl,FALSE);controlStop=nullptr;
+            ReleaseMutex(singleton.value);return 0;
+        }
         Indexer indexer(directory);
         const unsigned processors=std::max(1u,(unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
         WriterPacing sqlPacing(indexer.database.value,stop.value,parent.value,processors);
