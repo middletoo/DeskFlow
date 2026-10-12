@@ -4,6 +4,8 @@
 #include <iostream>
 #include <set>
 #include <chrono>
+#include <thread>
+#include <atomic>
 
 static void require(bool yes,const char* message){if(!yes)throw std::runtime_error(message);}
 static std::vector<desk::SearchItem> complete(desk::NativeCatalog& reader,const desk::SearchQuery& q,size_t limit,const desk::CatalogPredicate& predicate){
@@ -73,6 +75,11 @@ int wmain(int argc,wchar_t** argv){
         desk::appendCatalogChange(base,reader.generation(),0,99000000,{{99000000,101,0,1,1,0,false,true,"after-crash.txt"}});
         desk::SearchQuery crash;crash.text=L"after-crash";
         require(complete(reader,crash,10,[](const auto& v){return v.name=="after-crash.txt";}).size()==1,"new updates lost after repairing a partial crash tail");
+        desk::SearchStatus status;status.roots=1;status.complete=true;status.stage=L"ready";status.total=reader.total();desk::catalogStatus(base,status,GetCurrentProcessId(),{root});
+        std::atomic<bool> pollDone=false,pollFailed=false;
+        std::thread polling([&]{try{desk::NativeCatalog client(base);for(int i=0;i<4000&&!pollDone;++i){auto s=client.status();if(s.roots!=1)pollFailed=true;}}catch(...){pollFailed=true;}});
+        try{for(int i=0;i<500;++i){status.revision=i;desk::catalogStatus(base,status,GetCurrentProcessId(),{root});}}catch(...){pollDone=true;polling.join();throw;}
+        pollDone=true;polling.join();require(!pollFailed,"status replacement failed while a reader held the file");
         std::cout<<"PASS native global sorting, full pagination, metadata groups, hardlinks, rename/delete, directory paths and live continuation\n";
         std::cout<<"rows="<<count+4<<" build_seconds="<<built<<" catalog_bytes="<<fs::file_size(base/L"catalog.index")<<"\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';result=1;}

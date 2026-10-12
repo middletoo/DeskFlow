@@ -76,6 +76,17 @@ struct Mapping {
         data=(unsigned char*)MapViewOfFile(map,write?FILE_MAP_WRITE:FILE_MAP_READ,0,0,0);if(!data)fail("Read native catalog mapping");
     }
 };
+struct SharedInput {
+    HANDLE file=INVALID_HANDLE_VALUE;
+    explicit SharedInput(const fs::path& path){file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr);}
+    ~SharedInput(){if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);}
+    uint64_t size()const{LARGE_INTEGER n{};if(file==INVALID_HANDLE_VALUE||!GetFileSizeEx(file,&n)||n.QuadPart<0)return 0;return (uint64_t)n.QuadPart;}
+    void seek(uint64_t position){LARGE_INTEGER at{};at.QuadPart=(LONGLONG)position;if(!SetFilePointerEx(file,at,nullptr,FILE_BEGIN))fail("Seek catalog input");}
+    size_t read(void* target,size_t length){DWORD got=0;if(length>MAXDWORD||!ReadFile(file,target,(DWORD)length,&got,nullptr))fail("Read catalog input");return got;}
+};
+bool replaceFile(const fs::path& from,const fs::path& to,DWORD flags){
+    for(unsigned attempt=0;attempt<16;++attempt){if(MoveFileExW(from.c_str(),to.c_str(),flags))return true;DWORD error=GetLastError();if(error!=ERROR_ACCESS_DENIED&&error!=ERROR_SHARING_VIOLATION)return false;Sleep(10);SetLastError(error);}return false;
+}
 std::string_view name(const Mapping& m,const Header& h,const Row& r,bool folded=false){
     if(r.root>=h.roots||!r.id||r.id>h.maximumId||!(r.flags&lengthMask)||(r.flags&lengthMask)>1024)throw std::runtime_error("Catalog row metadata bounds");
     uint64_t off=r.name+(folded?(r.flags&lengthMask)+1:0);
@@ -320,11 +331,11 @@ struct NativeCatalog::Impl {
     }
     void refresh(){
         if(!load()||(active&&queryPending))return;
-        std::ifstream input(data/L"catalog.delta",std::ios::binary);if(!input)return;input.seekg(0,std::ios::end);auto length=input.tellg();
-        if(length<0||uint64_t(length)<deltaOffset)return;input.seekg(deltaOffset);
-        while(input){DeltaHeader h{};input.read((char*)&h,sizeof(h));if(input.gcount()!=sizeof(h))break;
+        SharedInput input(data/L"catalog.delta");if(input.file==INVALID_HANDLE_VALUE)return;auto length=input.size();
+        if(length<deltaOffset)return;input.seek(deltaOffset);
+        while(deltaOffset<length){DeltaHeader h{};if(input.read(&h,sizeof(h))!=sizeof(h))break;
             if(h.length<sizeof(DeltaFile)||h.length>64*1024*1024)throw std::runtime_error("Catalog update block bounds");
-            std::vector<unsigned char> payload(h.length);input.read((char*)payload.data(),payload.size());if(input.gcount()!=payload.size())break;
+            std::vector<unsigned char> payload(h.length);if(input.read(payload.data(),payload.size())!=payload.size())break;
             if(checksum(payload.data(),payload.size())!=h.checksum)throw std::runtime_error("Catalog update checksum mismatch");
             if(h.generation==header.generation){size_t at=0;auto f=take<DeltaFile>(payload,at);if(f.root>=header.roots||f.count>32768)throw std::runtime_error("Catalog update file bounds");std::vector<CatalogEntry> entries;
                 for(uint32_t i=0;i<f.count;++i){auto e=take<DeltaEntry>(payload,at);if(!e.length||e.length>1024||e.length>payload.size()-at)throw std::runtime_error("Catalog update string bounds");
@@ -436,11 +447,11 @@ void catalogStatus(const fs::path& data,const SearchStatus& s,DWORD pid,const st
     nlohmann::json j{{"engine","mapped-ntfs"},{"pid",pid},{"total",s.total},{"revision",s.revision},{"building",s.building},{"complete",s.complete},{"limited",s.limited},{"roots",s.roots},{"completedRoots",s.completedRoots},{"readRecords",s.readRecords},{"materializedRecords",s.materializedRecords},{"elapsedSeconds",s.elapsedSeconds},{"estimatedRecords",s.estimatedRecords},{"stage",bytes(s.stage)},{"message",bytes(s.message)},{"volumes",nlohmann::json::array()}};
     for(const auto& r:roots)j["volumes"].push_back({{"serial",r.serial},{"journal",r.journal},{"cursor",r.nextUsn}});
     auto temporary=data/L"catalog.status.tmp";{std::ofstream out(temporary,std::ios::binary|std::ios::trunc);out<<j.dump();out.flush();if(!out)throw std::runtime_error("Catalog status write failed");}
-    if(!MoveFileExW(temporary.c_str(),(data/L"catalog.status").c_str(),MOVEFILE_REPLACE_EXISTING))fail("Publish catalog status");
+    if(!replaceFile(temporary,data/L"catalog.status",MOVEFILE_REPLACE_EXISTING))fail("Publish catalog status");
 }
 SearchStatus NativeCatalog::status(){
     if(fs::exists(impl_->data/L"catalog.disabled"))return {};
-    std::ifstream input(impl_->data/L"catalog.status",std::ios::binary);if(!input)return {};nlohmann::json j;input>>j;SearchStatus s;
+    SharedInput input(impl_->data/L"catalog.status");if(input.file==INVALID_HANDLE_VALUE)return {};auto length=input.size();if(!length||length>1024*1024)throw std::runtime_error("Catalog status bounds");std::string content((size_t)length,'\0');if(input.read(content.data(),content.size())!=content.size())throw std::runtime_error("Catalog status incomplete");auto j=nlohmann::json::parse(content);SearchStatus s;
     s.total=j.value("total",int64_t{});s.revision=j.value("revision",int64_t{});s.building=j.value("building",false);s.complete=j.value("complete",false);s.limited=j.value("limited",false);s.roots=j.value("roots",0);s.completedRoots=j.value("completedRoots",0);s.readRecords=j.value("readRecords",int64_t{});s.materializedRecords=j.value("materializedRecords",int64_t{});s.elapsedSeconds=j.value("elapsedSeconds",int64_t{});s.estimatedRecords=j.value("estimatedRecords",int64_t{});s.stage=text(j.value("stage",std::string{}));s.message=text(j.value("message",std::string{}));
     DWORD pid=j.value("pid",DWORD{});HANDLE p=pid?OpenProcess(SYNCHRONIZE,FALSE,pid):nullptr;if(pid&&((p&&WaitForSingleObject(p,0)==WAIT_OBJECT_0)||(!p&&GetLastError()==ERROR_INVALID_PARAMETER))){s.building=false;s.message=L"索引进程已停止，已有索引可查";s.stage=L"stopped";}if(p)CloseHandle(p);return s;
 }
