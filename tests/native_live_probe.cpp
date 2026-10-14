@@ -11,7 +11,10 @@ int wmain(int argc,wchar_t** argv){
     for(int i=1;i+1<argc;++i){std::wstring a=argv[i];if(a==L"--data")data=argv[++i];else if(a==L"--fixtures")parent=argv[++i];else if(a==L"--report")report=argv[++i];}
     if(data.empty()||parent.empty()||report.empty())return 2;
     const auto unique=L"deskflow-native-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64());
-    const auto base=fs::absolute(parent)/unique;fs::create_directories(base/L"folder");auto primary=base/L"folder"/(unique+L"-primary.txt");nlohmann::json result;
+    auto physical=fs::absolute(parent);
+    HANDLE directory=CreateFileW(physical.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+    if(directory!=INVALID_HANDLE_VALUE){wchar_t path[32768]{};if(GetFinalPathNameByHandleW(directory,path,32768,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS)){std::wstring resolved(path);if(resolved.starts_with(L"\\\\?\\"))resolved.erase(0,4);physical=resolved;}CloseHandle(directory);}
+    const auto base=physical/unique;fs::create_directories(base/L"folder");auto primary=base/L"folder"/(unique+L"-primary.txt");nlohmann::json result;
     try{
         desk::SearchStore store(data);
         auto find=[&](const fs::path& p){desk::SearchQuery q;q.text=L"\""+p.filename().wstring()+L"\"";auto rows=store.query(q,100);for(int i=0;i<100&&store.queryPending();++i)rows=store.query(q,100);
@@ -32,6 +35,6 @@ int wmain(int argc,wchar_t** argv){
         auto status=store.status();result["indexed_objects"]=status.total;result["complete"]=status.complete;result["limited"]=status.limited;result["ok"]=true;
     }catch(const std::exception& e){result["ok"]=false;result["error"]=e.what();}
     std::ofstream output(report);output<<result.dump(2);output.close();std::cout<<result.dump()<<'\n';
-    auto checked=fs::weakly_canonical(base);if(checked.parent_path()==fs::weakly_canonical(parent)&&checked.filename().wstring().starts_with(L"deskflow-native-")){std::error_code ec;fs::remove_all(checked,ec);}
+    auto checked=fs::weakly_canonical(base);if(checked.parent_path()==fs::weakly_canonical(physical)&&checked.filename().wstring().starts_with(L"deskflow-native-")){std::error_code ec;fs::remove_all(checked,ec);}
     return result.value("ok",false)?0:1;
 }

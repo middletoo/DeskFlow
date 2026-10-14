@@ -494,9 +494,10 @@ std::vector<SearchItem> NativeCatalog::query(const SearchQuery& query,size_t lim
     b.results.insert(b.results.end(),b.overlayMatches.begin(),b.overlayMatches.end());
     std::sort(b.results.begin(),b.results.end(),[&](const auto& a,const auto& c){return less(a,c,query);});if(b.results.size()>limit)b.results.resize(limit);b.active=false;return b.results;
 }
-void catalogStatus(const fs::path& data,const SearchStatus& s,DWORD pid,const std::vector<ntfs::Root>& roots){
+void catalogStatus(const fs::path& data,const SearchStatus& s,DWORD pid,const std::vector<ntfs::Root>& roots,uint64_t generation){
     nlohmann::json j{{"engine","mapped-ntfs"},{"pid",pid},{"total",s.total},{"revision",s.revision},{"building",s.building},{"complete",s.complete},{"limited",s.limited},{"roots",s.roots},{"completedRoots",s.completedRoots},{"readRecords",s.readRecords},{"materializedRecords",s.materializedRecords},{"elapsedSeconds",s.elapsedSeconds},{"estimatedRecords",s.estimatedRecords},{"stage",bytes(s.stage)},{"message",bytes(s.message)},{"volumes",nlohmann::json::array()}};
     for(const auto& r:roots)j["volumes"].push_back({{"serial",r.serial},{"journal",r.journal},{"cursor",r.nextUsn}});
+    j["generation"]=generation;
     auto temporary=data/L"catalog.status.tmp";{std::ofstream out(temporary,std::ios::binary|std::ios::trunc);out<<j.dump();out.flush();if(!out)throw std::runtime_error("Catalog status write failed");}
     if(!replaceFile(temporary,data/L"catalog.status",MOVEFILE_REPLACE_EXISTING))fail("Publish catalog status");
 }
@@ -506,6 +507,14 @@ SearchStatus NativeCatalog::status(){
     s.total=j.value("total",int64_t{});s.revision=j.value("revision",int64_t{});s.building=j.value("building",false);s.complete=j.value("complete",false);s.limited=j.value("limited",false);s.roots=j.value("roots",0);s.completedRoots=j.value("completedRoots",0);s.readRecords=j.value("readRecords",int64_t{});s.materializedRecords=j.value("materializedRecords",int64_t{});s.elapsedSeconds=j.value("elapsedSeconds",int64_t{});s.estimatedRecords=j.value("estimatedRecords",int64_t{});s.stage=text(j.value("stage",std::string{}));s.message=text(j.value("message",std::string{}));
     if(!s.total){SharedInput existing(snapshotName(impl_->data,currentGeneration(impl_->data)));Header h{};if(existing.file!=INVALID_HANDLE_VALUE&&existing.read(&h,sizeof(h))==sizeof(h)&&!memcmp(h.magic,"DFLOWIDX",8)&&h.version==format)s.total=(int64_t)h.total;}
     DWORD pid=j.value("pid",DWORD{});HANDLE p=pid?OpenProcess(SYNCHRONIZE,FALSE,pid):nullptr;if(pid&&((p&&WaitForSingleObject(p,0)==WAIT_OBJECT_0)||(!p&&GetLastError()==ERROR_INVALID_PARAMETER))){s.building=false;s.message=L"索引进程已停止，已有索引可查";s.stage=L"stopped";}if(p)CloseHandle(p);return s;
+}
+void restoreCatalogCheckpoint(const fs::path& data,uint64_t generation,std::vector<ntfs::Root>& roots){
+    SharedInput input(data/L"catalog.status");if(input.file==INVALID_HANDLE_VALUE)return;auto length=input.size();if(!length||length>1024*1024)return;
+    std::string content((size_t)length,'\0');if(input.read(content.data(),content.size())!=content.size())return;auto previous=nlohmann::json::parse(content);
+    // A checkpoint from the preceding snapshot may be ahead of this new
+    // snapshot, but its update blocks belong to that older generation.
+    if(previous.value("generation",uint64_t{})!=generation||!previous.contains("volumes")||previous["volumes"].size()!=roots.size())return;
+    for(size_t i=0;i<roots.size();++i){const auto& p=previous["volumes"][i];if(p.value("serial",DWORD{})==roots[i].serial&&p.value("journal",uint64_t{})==roots[i].journal)roots[i].nextUsn=std::max(roots[i].nextUsn,p.value("cursor",roots[i].nextUsn));}
 }
 void buildCatalogLookup(const fs::path& data,const std::function<bool()>& stopped,const std::function<void(const std::wstring&)>& progress){
     NativeCatalog validated(data);if(!validated.available())throw std::runtime_error("Native snapshot unavailable for lookup construction");
@@ -533,8 +542,8 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
     SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_END);SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
     const auto began=GetTickCount64();SearchStatus status;status.roots=(int)roots.size();status.building=true;status.stage=L"records";status.message=L"原生 NTFS 索引 · 新快照构建期间已有结果可查";
     for(auto& r:roots)status.estimatedRecords+=r.records;
-    uint64_t revision=stamp()&INT64_MAX;auto lastPublished=GetTickCount64();
-    auto publish=[&](bool force=false){if(!force&&GetTickCount64()-lastPublished<1000)return;status.elapsedSeconds=(GetTickCount64()-began)/1000;status.revision=(int64_t)revision;catalogStatus(data,status,GetCurrentProcessId(),roots);lastPublished=GetTickCount64();};
+    uint64_t revision=stamp()&INT64_MAX,checkpointGeneration=0;auto lastPublished=GetTickCount64();
+    auto publish=[&](bool force=false){if(!force&&GetTickCount64()-lastPublished<1000)return;status.elapsedSeconds=(GetTickCount64()-began)/1000;status.revision=(int64_t)revision;catalogStatus(data,status,GetCurrentProcessId(),roots,checkpointGeneration);lastPublished=GetTickCount64();};
     // Exclude only this tool's own catalog/SQLite index files, by physical parent ID.
     Key own{UINT16_MAX,0};HANDLE directory=CreateFileW(data.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
     if(directory!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};wchar_t path[32768]{};if(GetFileInformationByHandle(directory,&info)&&GetFinalPathNameByHandleW(directory,path,32768,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS)){
@@ -546,14 +555,14 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
         NativeCatalog reader(data);bool rebuild=true;const bool requestedRebuild=fs::exists(data/L"catalog.rebuild");
         try{
             if(reader.available()){
+                checkpointGeneration=reader.generation();status.total=(int64_t)reader.total();
                 auto saved=reader.volumes();rebuild=saved.size()!=roots.size();
                 if(!rebuild)for(size_t i=0;i<roots.size();++i)if(saved[i].serial!=roots[i].serial||saved[i].journal!=roots[i].journal||saved[i].path!=roots[i].path)rebuild=true;
                 if(requestedRebuild)rebuild=true;
                 if(!rebuild){
                     reader.repairIncompleteLog();
-                    std::ifstream input(data/L"catalog.status");nlohmann::json previous;if(input)input>>previous;
-                    for(size_t i=0;i<roots.size();++i){roots[i].nextUsn=saved[i].nextUsn;if(previous.contains("volumes")&&previous["volumes"].size()==roots.size()){
-                        const auto& p=previous["volumes"][i];if(p.value("serial",DWORD{})==roots[i].serial&&p.value("journal",uint64_t{})==roots[i].journal)roots[i].nextUsn=p.value("cursor",roots[i].nextUsn);}}
+                    for(size_t i=0;i<roots.size();++i)roots[i].nextUsn=saved[i].nextUsn;
+                    restoreCatalogCheckpoint(data,reader.generation(),roots);
                     for(size_t i=0;i<volumes.size();++i){std::vector<ntfs::Change> changes;volumes[i]->changes(roots[i].nextUsn,changes);}
                 }
             }
@@ -599,7 +608,7 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
             // A new immutable snapshot includes the initial journal cursor;
             // superseded update logs are rotated after the snapshot is durable.
             if(fs::exists(data/L"catalog.delta"))MoveFileExW((data/L"catalog.delta").c_str(),(data/L"catalog.delta.previous").c_str(),MOVEFILE_REPLACE_EXISTING);
-            reader.available();
+            reader.available();checkpointGeneration=reader.generation();
             DeleteFileW((data/L"catalog.rebuild").c_str());
         }
         if(!fs::exists(lookupName(data,reader.generation()))&&!fs::exists(data/L"catalog.lookup")){status.stage=L"sorts";publish(true);buildCatalogLookup(data,stopped,[&](const auto& step){status.message=step;publish(true);});}
@@ -615,7 +624,7 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
                 // arrived while the background snapshot was being constructed.
                 auto checkpoint=compaction.get();
                 MoveFileExW((data/L"catalog.delta").c_str(),(data/L"catalog.delta.previous").c_str(),MOVEFILE_REPLACE_EXISTING);
-                reader.available();for(size_t i=0;i<roots.size();++i)roots[i].nextUsn=checkpoint[i].nextUsn;
+                reader.available();checkpointGeneration=reader.generation();for(size_t i=0;i<roots.size();++i)roots[i].nextUsn=checkpoint[i].nextUsn;
                 ++revision;lastCompaction=GetTickCount64();
             }
             bool changed=false,caughtUp=true;

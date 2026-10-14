@@ -53,7 +53,9 @@ void appendCatalogChange(const std::filesystem::path&,uint64_t generation,uint16
                          uint64_t file,const std::vector<CatalogEntry>&,bool durable=true);
 void flushCatalogChanges(const std::filesystem::path&);
 void catalogStatus(const std::filesystem::path&,const SearchStatus&,DWORD pid,
-                   const std::vector<ntfs::Root>&);
+                   const std::vector<ntfs::Root>&,uint64_t generation=0);
+void restoreCatalogCheckpoint(const std::filesystem::path&,uint64_t generation,
+                              std::vector<ntfs::Root>& roots);
 bool runNativeCatalog(const std::filesystem::path&,const std::vector<std::wstring>&,
                       HANDLE stop,HANDLE parent);
 void buildCatalogLookup(const std::filesystem::path&,const std::function<bool()>& stopped,

@@ -14,6 +14,8 @@ Compaction runs in a separate task while USN monitoring continues; changes are r
 
 New regressions cover publication with active mapped readers, paired lookup switches, shorter log rotation and restart after repeated directory/child updates. A rebuild after a journal gap now starts at the current journal head; it no longer reuses the expired cursor and immediately rebuilds again. Background compaction can temporarily increase CPU, I/O and mapped working sets; older resource measurements apply only to their stated versions and conditions.
 
+This local rebuild was confirmed ready within 224 seconds of index-process startup, covering about 6.95 million objects across three volumes. A new query process with warm system caches took about 20 ms for its first “AI 金融” query and 0.3–0.5 ms for subsequent sorts. Synthetic create, modify, delete, rename and hardlink checks passed on C, D and E in about 178–315 ms; the installed UI showed creates in about 252 ms and deletions in 249 ms. C-volume updates also passed during background compaction. Checkpoints now carry the snapshot generation so restart cannot skip compaction-period changes using a preceding generation’s cursor. These observations do not guarantee cold-cache behavior or all queries.
+
 ## 0.4.0: native NTFS catalog
 
 Administrator indexing now obtains long filenames, hardlink names, sizes and modification times directly from the MFT. Raw metadata reads and the file-record API are supported; volumes without trustworthy raw reads use the file-record API. USN changes update the affected files rather than scheduling whole-volume directory scans for hardlink changes.

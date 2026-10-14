@@ -89,6 +89,13 @@ int wmain(int argc,wchar_t** argv){
         desk::SearchQuery published;published.text=L"after-publication";
         require(complete(reader,published,10,[](const auto& v){return v.name=="after-publication.txt";}).size()==1,"live mapped reader did not switch snapshot generations");
         require(reader.generation()!=oldGeneration&&fs::exists(oldSnapshot),"publication replaced a mapped snapshot");
+        auto savedRoots=reader.volumes(),ahead=savedRoots;ahead[0].nextUsn+=1000;
+        desk::catalogStatus(base,status,GetCurrentProcessId(),ahead,oldGeneration);
+        desk::restoreCatalogCheckpoint(base,reader.generation(),savedRoots);
+        require(savedRoots[0].nextUsn==root.nextUsn,"previous generation checkpoint skipped changes after publication");
+        desk::catalogStatus(base,status,GetCurrentProcessId(),ahead,reader.generation());
+        desk::restoreCatalogCheckpoint(base,reader.generation(),savedRoots);
+        require(savedRoots[0].nextUsn==ahead[0].nextUsn,"matching generation checkpoint was not restored");
         // Simulate log rotation between a reader's reload and its next poll.
         fs::rename(base/L"catalog.delta",base/L"catalog.delta.previous");
         desk::appendCatalogChange(base,reader.generation(),0,99000002,{{99000002,101,0,3,3,0,false,true,"after-rotation.txt"}});
