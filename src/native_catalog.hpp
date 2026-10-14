@@ -32,6 +32,7 @@ class NativeCatalog {
     void replace(uint16_t root,uint64_t reference,const std::vector<CatalogEntry>& entries);
     uint64_t total()const;
     uint64_t generation()const;
+    std::filesystem::path snapshotFile()const;
     std::vector<ntfs::Root> volumes();
     void repairIncompleteLog();
     void each(const std::function<void(const CatalogEntry&)>&)const;
@@ -49,7 +50,8 @@ class CatalogBuilder {
                     const std::function<void(const std::wstring&)>& progress);
 };
 void appendCatalogChange(const std::filesystem::path&,uint64_t generation,uint16_t root,
-                         uint64_t file,const std::vector<CatalogEntry>&);
+                         uint64_t file,const std::vector<CatalogEntry>&,bool durable=true);
+void flushCatalogChanges(const std::filesystem::path&);
 void catalogStatus(const std::filesystem::path&,const SearchStatus&,DWORD pid,
                    const std::vector<ntfs::Root>&);
 bool runNativeCatalog(const std::filesystem::path&,const std::vector<std::wstring>&,

@@ -30,7 +30,7 @@ Hover over a top function entry to see its current hotkey. Change keys in Tools 
 
 ![File search](images/files.png)
 
-The lower-left total includes files and folders. Version 0.4.0 administrator indexing reads NTFS names, hardlinks, sizes and times from the MFT, then builds fast orders and filename candidates. USN updates affected records. Restart reuses the snapshot and valid checkpoints; a journal gap rebuilds a trustworthy snapshot. Incomplete, unavailable and limited coverage are labeled.
+The lower-left total includes files and folders. Version 0.4.1 administrator indexing reads NTFS names, hardlinks, sizes and times from the MFT, then builds fast orders and filename candidates. USN updates affected records. Restart reuses the snapshot and valid checkpoints; a journal gap rebuilds a trustworthy snapshot. Incomplete, unavailable and limited coverage are labeled.
 
 Press Alt+Q and enter a filename. Spaces combine terms with AND, for example `report 2026`. Names are matched by default; enable full-path matching in Search to include parent directories. Use `ext:pdf`, `ext:pdf;docx`, `type:folder` or `in:C:\Demo` to narrow results. `*` and `?` are wildcards; `regex:` enables the supported basic expressions.
 
@@ -129,7 +129,7 @@ GIF has no audio; use MP4 for livestream sound. Recording streams to temporary s
 
 ## Data, backup and privacy
 
-Tools → Open data directory reveals the current user's storage. `history.db` plus `objects/` form the history; `catalog.index`, `catalog.lookup` and `catalog.delta` form the native NTFS index; the old `files.db` remains available. Updates preserve package-family storage. Back up into a new directory. Exit before restoring and preserve the old data directory; do not copy an actively written database. Encrypted attachments need a backup location supporting their file encryption.
+Tools → Open data directory reveals the current user's storage. `history.db` plus `objects/` form the history; `catalog.current`, `catalog.<generation>.index`, `catalog.<generation>.lookup` and `catalog.delta` form the native NTFS index; legacy `catalog.index`/`catalog.lookup` remain readable; the old `files.db` remains available. Updates preserve package-family storage. Back up into a new directory. Exit before restoring and preserve the old data directory; do not copy an actively written database. Encrypted attachments need a backup location supporting their file encryption.
 
 The public repository excludes personal data, real history, API keys, private signing keys, validation backups and local development history. Screenshots show synthetic content on a private desktop. Actual system audio recordings are not published.
 

@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <system_error>
 #include <queue>
+#include <future>
+#include <atomic>
 
 namespace desk {
 namespace {
@@ -87,6 +89,33 @@ struct SharedInput {
 bool replaceFile(const fs::path& from,const fs::path& to,DWORD flags){
     for(unsigned attempt=0;attempt<16;++attempt){if(MoveFileExW(from.c_str(),to.c_str(),flags))return true;DWORD error=GetLastError();if(error!=ERROR_ACCESS_DENIED&&error!=ERROR_SHARING_VIOLATION)return false;Sleep(10);SetLastError(error);}return false;
 }
+struct CatalogPointer {char magic[8]{};uint64_t generation=0;};
+uint64_t currentGeneration(const fs::path& data){
+    SharedInput input(data/L"catalog.current");if(input.file==INVALID_HANDLE_VALUE)return 0;
+    CatalogPointer pointer{};if(input.size()!=sizeof(pointer)||input.read(&pointer,sizeof(pointer))!=sizeof(pointer)||memcmp(pointer.magic,"DFCAT001",8)||!pointer.generation)throw std::runtime_error("Invalid catalog publication pointer");
+    return pointer.generation;
+}
+fs::path snapshotName(const fs::path& data,uint64_t generation){return generation?data/(L"catalog."+std::to_wstring(generation)+L".index"):data/L"catalog.index";}
+fs::path lookupName(const fs::path& data,uint64_t generation){return data/(L"catalog."+std::to_wstring(generation)+L".lookup");}
+void cleanRetiredGenerations(const fs::path& data,uint64_t current){
+    std::vector<std::pair<uint64_t,fs::path>> files;uint64_t previous=0;std::error_code ec;
+    for(fs::directory_iterator it(data,ec),end;!ec&&it!=end;it.increment(ec)){
+        auto name=it->path().filename().wstring();if(!name.starts_with(L"catalog.")||(!name.ends_with(L".index")&&!name.ends_with(L".lookup")))continue;
+        auto last=name.rfind(L'.');auto digits=name.substr(8,last-8);if(digits.empty()||digits.size()>20||digits.find_first_not_of(L"0123456789")!=std::wstring::npos)continue;
+        try{auto generation=std::stoull(digits);if(generation<current){files.emplace_back(generation,it->path());if(name.ends_with(L".index"))previous=std::max(previous,generation);}}catch(...){}
+    }
+    // Retain the current/previous generation. Mapped older files may remain
+    // until their readers release them; retry cleanup on the next idle pass.
+    for(const auto& [generation,path]:files)if(generation!=previous)DeleteFileW(path.c_str());
+}
+void publishGeneration(const fs::path& data,uint64_t generation){
+    CatalogPointer pointer{};memcpy(pointer.magic,"DFCAT001",8);pointer.generation=generation;
+    const auto temporary=data/L"catalog.current.tmp";
+    HANDLE handle=CreateFileW(temporary.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,CREATE_ALWAYS,FILE_FLAG_WRITE_THROUGH,nullptr);if(handle==INVALID_HANDLE_VALUE)fail("Create catalog pointer");
+    DWORD written=0;bool ok=WriteFile(handle,&pointer,sizeof(pointer),&written,nullptr)&&written==sizeof(pointer)&&FlushFileBuffers(handle);DWORD error=GetLastError();CloseHandle(handle);if(!ok){SetLastError(error);fail("Write catalog pointer");}
+    if(!replaceFile(temporary,data/L"catalog.current",MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))fail("Publish catalog pointer");
+    cleanRetiredGenerations(data,generation);
+}
 std::string_view name(const Mapping& m,const Header& h,const Row& r,bool folded=false){
     if(r.root>=h.roots||!r.id||r.id>h.maximumId||!(r.flags&lengthMask)||(r.flags&lengthMask)>1024)throw std::runtime_error("Catalog row metadata bounds");
     uint64_t off=r.name+(folded?(r.flags&lengthMask)+1:0);
@@ -144,7 +173,7 @@ void lookup(const fs::path& data,const Mapping& mapped,const Header& h,const std
     if(!directory.empty())directory.back().length=offset-directory.back().offset;payload.close();if(!payload)throw std::runtime_error("Catalog lookup compression failed");
     LookupHeader header{};memcpy(header.magic,"DFLOOKUP",8);header.generation=h.generation;header.rows=h.rows;header.keys=directory.size();header.directory=sizeof(header);header.payload=header.directory+directory.size()*sizeof(LookupKey);header.bytes=header.payload+offset;
     const auto temp=data/L"catalog.lookup.tmp";std::ofstream out(temp,std::ios::binary|std::ios::trunc);out.write((const char*)&header,sizeof(header));out.write((const char*)directory.data(),directory.size()*sizeof(LookupKey));std::ifstream compressed(payloadPath,std::ios::binary);out<<compressed.rdbuf();out.flush();if(!out)throw std::runtime_error("Catalog lookup publish write failed");out.close();compressed.close();
-    if(!MoveFileExW(temp.c_str(),(data/L"catalog.lookup").c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))fail("Publish catalog lookup");
+    if(!MoveFileExW(temp.c_str(),lookupName(data,h.generation).c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))fail("Publish catalog lookup");
     for(auto& input:inputs)input.close();for(const auto& path:runs)DeleteFileW(path.c_str());DeleteFileW(payloadPath.c_str());
 }
 std::vector<ntfs::Root> roots(const Mapping& m,const Header& h){
@@ -232,7 +261,10 @@ uint64_t CatalogBuilder::finish(const std::function<bool()>& stopped,const std::
     for(uint64_t i=1;i<h.rows;++i){auto& a=records[byFile[i-1]];auto& c=records[byFile[i]];if(a.root==c.root&&a.file==c.file&&a.parent==c.parent&&name(mapped,h,a)==name(mapped,h,c)){c.flags|=duplicateBit;--h.total;}}
     memcpy(mapped.data,&h,sizeof(h));lookup(b.directory,mapped,h,stopped,progress);
     if(!FlushViewOfFile(mapped.data,0)||!FlushFileBuffers(mapped.file))fail("Flush native catalog");mapped.close();
-    if(!MoveFileExW(target.c_str(),(b.directory/L"catalog.index").c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))fail("Publish native catalog");
+    // A mapped Windows file cannot be replaced while readers use its section.
+    // Publish immutable generation files, then atomically switch a tiny pointer.
+    if(!MoveFileExW(target.c_str(),snapshotName(b.directory,h.generation).c_str(),MOVEFILE_WRITE_THROUGH))fail("Publish native catalog generation");
+    publishGeneration(b.directory,h.generation);
     // Only owned temporary build files are removed, never user databases.
     input.close();strings.close();DeleteFileW(b.spoolPath.c_str());DeleteFileW(b.stringPath.c_str());DeleteFileW(recordsPath.c_str());
     return b.unresolved;
@@ -256,7 +288,7 @@ bool less(const SearchItem& a,const SearchItem& b,const SearchQuery& q){
     if(!relation)relation=a.id<b.id?-1:a.id>b.id?1:0;return q.descending?relation>0:relation<0;
 }
 }
-void appendCatalogChange(const fs::path& data,uint64_t generation,uint16_t root,uint64_t file,const std::vector<CatalogEntry>& entries){
+void appendCatalogChange(const fs::path& data,uint64_t generation,uint16_t root,uint64_t file,const std::vector<CatalogEntry>& entries,bool durable){
     if(entries.size()>32768)throw std::runtime_error("Too many NTFS hardlinks");
     std::vector<unsigned char> payload;append(payload,DeltaFile{file,root,0,(uint32_t)entries.size()});
     for(const auto& e:entries){if(e.name.empty()||e.name.size()>1024)throw std::runtime_error("Catalog update name bounds");
@@ -264,14 +296,20 @@ void appendCatalogChange(const fs::path& data,uint64_t generation,uint16_t root,
     DeltaHeader header{(uint32_t)payload.size(),checksum(payload.data(),payload.size()),generation};
     HANDLE handle=CreateFileW((data/L"catalog.delta").c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_ALWAYS,0,nullptr);
     if(handle==INVALID_HANDLE_VALUE)fail("Open catalog changes");
-    DWORD written=0;bool ok=WriteFile(handle,&header,sizeof(header),&written,nullptr)&&written==sizeof(header)&&WriteFile(handle,payload.data(),(DWORD)payload.size(),&written,nullptr)&&written==payload.size()&&FlushFileBuffers(handle);DWORD error=GetLastError();CloseHandle(handle);if(!ok){SetLastError(error);fail("Commit catalog changes");}
+    DWORD written=0;bool ok=WriteFile(handle,&header,sizeof(header),&written,nullptr)&&written==sizeof(header)&&WriteFile(handle,payload.data(),(DWORD)payload.size(),&written,nullptr)&&written==payload.size()&&(!durable||FlushFileBuffers(handle));DWORD error=GetLastError();CloseHandle(handle);if(!ok){SetLastError(error);fail("Commit catalog changes");}
+}
+void flushCatalogChanges(const fs::path& data){
+    HANDLE handle=CreateFileW((data/L"catalog.delta").c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(handle==INVALID_HANDLE_VALUE)fail("Open catalog changes for commit");
+    bool ok=FlushFileBuffers(handle);DWORD error=GetLastError();CloseHandle(handle);if(!ok){SetLastError(error);fail("Flush catalog change batch");}
 }
 struct NativeCatalog::Impl {
     fs::path data;Mapping mapped,lookupMap;Header header{};std::vector<ntfs::Root> rootInfo;
-    FILETIME identity{};uint64_t deltaOffset=0,maximumId=0,objectCount=0;
+    FILETIME identity{};uint64_t selectedGeneration=0,deltaIdentity=0,deltaOffset=0,maximumId=0,objectCount=0;
+    fs::path snapshot;
     std::map<Key,std::vector<CatalogEntry>> updates;
     std::unordered_set<uint32_t> moved;
     std::unordered_map<Key,std::string,KeyHash> pathCache;
+    std::map<Key,std::set<Key>> directoryChildren;
     bool directoryChanges=false,queryPending=false;
     SearchQuery request;size_t limit=0;uint64_t position=0;
     std::vector<SearchItem> overlayMatches,results;
@@ -282,11 +320,12 @@ struct NativeCatalog::Impl {
     const uint32_t* order(size_t i)const{return (const uint32_t*)(mapped.data+header.order[i]);}
     bool load(){
         if(fs::exists(data/L"catalog.disabled"))return false;
+        const auto generation=currentGeneration(data);auto selected=snapshotName(data,generation);
         WIN32_FILE_ATTRIBUTE_DATA attributes{};
-        if(!GetFileAttributesExW((data/L"catalog.index").c_str(),GetFileExInfoStandard,&attributes))return mapped.data!=nullptr;
-        if(mapped.data&&CompareFileTime(&identity,&attributes.ftLastWriteTime)==0)return true;
+        if(!GetFileAttributesExW(selected.c_str(),GetFileExInfoStandard,&attributes))return mapped.data!=nullptr;
+        if(mapped.data&&selectedGeneration==generation&&CompareFileTime(&identity,&attributes.ftLastWriteTime)==0)return true;
         if(active&&queryPending)return mapped.data!=nullptr; // Complete this query against its stable base.
-        mapped.open(data/L"catalog.index");if(mapped.length<sizeof(Header))throw std::runtime_error("Catalog header truncated");memcpy(&header,mapped.data,sizeof(header));
+        mapped.open(selected);if(mapped.length<sizeof(Header))throw std::runtime_error("Catalog header truncated");memcpy(&header,mapped.data,sizeof(header));
         if(memcmp(header.magic,"DFLOWIDX",8)||header.version!=format||header.roots>32||!header.roots||header.rows>UINT32_MAX||header.bytes!=mapped.length||header.total>header.rows)throw std::runtime_error("Invalid catalog header");
         auto range=[&](uint64_t offset,uint64_t count,uint64_t size){return offset<=mapped.length&&count<=((mapped.length-offset)/size);};
         if(!range(sizeof(Header),header.roots,sizeof(RootDisk))||!range(header.records,header.rows,sizeof(Row))||!range(header.strings,header.stringsSize,1))throw std::runtime_error("Catalog section bounds");
@@ -294,8 +333,9 @@ struct NativeCatalog::Impl {
         // Validate individual rows when accessed. Walking every record here
         // would page hundreds of MiB in before even an empty first query.
         if(header.maximumId>INT64_MAX)throw std::runtime_error("Catalog object ID bounds");
-        rootInfo=roots(mapped,header);identity=attributes.ftLastWriteTime;maximumId=header.maximumId;objectCount=header.total;
-        deltaOffset=0;updates.clear();moved.clear();pathCache.clear();lookupMap.close();candidates.reset();directoryChanges=false;active=false;queryPending=false;return true;
+        if(generation&&header.generation!=generation)throw std::runtime_error("Catalog pointer generation mismatch");
+        rootInfo=roots(mapped,header);identity=attributes.ftLastWriteTime;selectedGeneration=generation;snapshot=selected;maximumId=header.maximumId;objectCount=header.total;
+        deltaOffset=deltaIdentity=0;updates.clear();moved.clear();pathCache.clear();directoryChildren.clear();lookupMap.close();candidates.reset();directoryChanges=false;active=false;queryPending=false;return true;
     }
     std::pair<const uint32_t*,const uint32_t*> range(Key key,Order which)const{
         auto* first=order(which);auto* end=first+header.rows;
@@ -312,11 +352,12 @@ struct NativeCatalog::Impl {
         std::vector<Key> queue{key};std::unordered_set<Key,KeyHash> seen;
         for(size_t at=0;at<queue.size();++at){if(!seen.insert(queue[at]).second)continue;auto [first,last]=range(queue[at],ByParent);
             for(;first!=last;++first){if(moved.insert(*first).second){auto& r=records()[*first];if(r.flags&folderBit)queue.push_back({r.root,r.file});}}
-            for(const auto& [k,es]:updates)for(const auto& e:es)if(e.folder&&Key{e.root,e.parent}==queue[at])queue.push_back(k);
+            auto children=directoryChildren.find(queue[at]);if(children!=directoryChildren.end())for(auto child:children->second)queue.push_back(child);
         }
     }
     void replace(Key key,std::vector<CatalogEntry> current){
         auto previous=file(key);std::set<uint64_t> assigned;bool folder=false;
+        if(previous.empty()&&current.empty())return;
         // Reserve exact aliases before giving a renamed/new alias an old ID.
         for(auto& e:current){auto found=std::find_if(previous.begin(),previous.end(),[&](const auto& old){return old.parent==e.parent&&old.name==e.name;});if(!e.id&&found!=previous.end())e.id=found->id;if(e.id)assigned.insert(e.id);}
         const bool namespaceChanged=current.size()!=previous.size()||std::any_of(current.begin(),current.end(),[&](const auto& e){return std::none_of(previous.begin(),previous.end(),[&](const auto& p){return p.parent==e.parent&&p.name==e.name;});});
@@ -326,13 +367,21 @@ struct NativeCatalog::Impl {
             if(!e.id)e.id=found!=previous.end()?found->id:++maximumId;maximumId=std::max(maximumId,e.id);assigned.insert(e.id);
         }
         folder|=std::any_of(previous.begin(),previous.end(),[](const auto& e){return e.folder;});
+        for(const auto& e:previous)if(e.folder){auto children=directoryChildren.find({e.root,e.parent});if(children!=directoryChildren.end())children->second.erase(key);}
+        for(const auto& e:current)if(e.folder)directoryChildren[{e.root,e.parent}].insert(key);
         objectCount=objectCount-previous.size()+current.size();updates[key]=std::move(current);
         if(folder&&namespaceChanged){directoryChanges=true;subtree(key);pathCache.clear();}
     }
     void refresh(){
         if(!load()||(active&&queryPending))return;
         SharedInput input(data/L"catalog.delta");if(input.file==INVALID_HANDLE_VALUE)return;auto length=input.size();
-        if(length<deltaOffset)return;input.seek(deltaOffset);
+        BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(input.file,&info))fail("Read catalog log identity");
+        const auto identity=(uint64_t(info.nFileIndexHigh)<<32)|info.nFileIndexLow;
+        if(identity!=deltaIdentity||length<deltaOffset){deltaOffset=0;deltaIdentity=identity;}
+        input.seek(deltaOffset);
+        // Replay final state per file, not every intermediate metadata update.
+        // Directory-child lookup is indexed rather than scanning all updates.
+        std::map<Key,std::vector<CatalogEntry>> latest;
         while(deltaOffset<length){DeltaHeader h{};if(input.read(&h,sizeof(h))!=sizeof(h))break;
             if(h.length<sizeof(DeltaFile)||h.length>64*1024*1024)throw std::runtime_error("Catalog update block bounds");
             std::vector<unsigned char> payload(h.length);if(input.read(payload.data(),payload.size())!=payload.size())break;
@@ -340,10 +389,11 @@ struct NativeCatalog::Impl {
             if(h.generation==header.generation){size_t at=0;auto f=take<DeltaFile>(payload,at);if(f.root>=header.roots||f.count>32768)throw std::runtime_error("Catalog update file bounds");std::vector<CatalogEntry> entries;
                 for(uint32_t i=0;i<f.count;++i){auto e=take<DeltaEntry>(payload,at);if(!e.length||e.length>1024||e.length>payload.size()-at)throw std::runtime_error("Catalog update string bounds");
                     entries.push_back({f.file,e.parent,e.id,e.size,e.modified,f.root,(e.flags&folderBit)!=0,(e.flags&knownBit)!=0,std::string((const char*)payload.data()+at,e.length)});at+=e.length;}
-                if(at!=payload.size())throw std::runtime_error("Catalog update trailing bytes");replace({f.root,f.file},std::move(entries));
+                if(at!=payload.size())throw std::runtime_error("Catalog update trailing bytes");latest[{f.root,f.file}]=std::move(entries);
             }
             deltaOffset+=sizeof(h)+h.length;
         }
+        for(auto& [key,entries]:latest)replace(key,std::move(entries));
     }
     std::string directory(Key key,std::set<Key>& visiting)const{
         if(key.first>=rootInfo.size())return {};
@@ -362,7 +412,7 @@ struct NativeCatalog::Impl {
     SearchItem item(const Row& e){SearchItem r;r.id=(int64_t)e.id;r.name=text(name(mapped,header,e));r.path=text(path(e));r.folder=(e.flags&folderBit)!=0;r.size=e.size;r.sizeKnown=(e.flags&knownBit)!=0;r.modified=e.modified;return r;}
     std::optional<std::vector<uint32_t>> candidateRows(const std::vector<std::string>& hints){
         if(hints.empty())return {};
-        try{if(!lookupMap.data)lookupMap.open(data/L"catalog.lookup");}catch(...){return {};}
+        try{if(!lookupMap.data){auto selected=lookupName(data,header.generation);if(!fs::exists(selected))selected=data/L"catalog.lookup";lookupMap.open(selected);}}catch(...){return {};}
         if(lookupMap.length<sizeof(LookupHeader))return {};auto& h=*(const LookupHeader*)lookupMap.data;
         if(memcmp(h.magic,"DFLOOKUP",8)||h.generation!=header.generation||h.rows!=header.rows||h.bytes!=lookupMap.length||h.keys>0x120000||h.directory>h.bytes||h.keys>(h.bytes-h.directory)/sizeof(LookupKey)||h.payload>h.bytes)return {};
         const auto* first=(const LookupKey*)(lookupMap.data+h.directory);const auto* last=first+h.keys;const LookupKey* chosen=nullptr;
@@ -380,6 +430,7 @@ bool NativeCatalog::available(){return impl_->load();}
 bool NativeCatalog::pending()const{return impl_->queryPending;}
 uint64_t NativeCatalog::total()const{return impl_->objectCount;}
 uint64_t NativeCatalog::generation()const{return impl_->header.generation;}
+fs::path NativeCatalog::snapshotFile()const{return impl_->snapshot;}
 std::vector<ntfs::Root> NativeCatalog::volumes(){return impl_->rootInfo;}
 void NativeCatalog::repairIncompleteLog(){
     auto& b=*impl_;b.refresh();std::error_code ec;auto length=fs::file_size(b.data/L"catalog.delta",ec);if(ec||length==b.deltaOffset)return;
@@ -453,11 +504,12 @@ SearchStatus NativeCatalog::status(){
     if(fs::exists(impl_->data/L"catalog.disabled"))return {};
     SharedInput input(impl_->data/L"catalog.status");if(input.file==INVALID_HANDLE_VALUE)return {};auto length=input.size();if(!length||length>1024*1024)throw std::runtime_error("Catalog status bounds");std::string content((size_t)length,'\0');if(input.read(content.data(),content.size())!=content.size())throw std::runtime_error("Catalog status incomplete");auto j=nlohmann::json::parse(content);SearchStatus s;
     s.total=j.value("total",int64_t{});s.revision=j.value("revision",int64_t{});s.building=j.value("building",false);s.complete=j.value("complete",false);s.limited=j.value("limited",false);s.roots=j.value("roots",0);s.completedRoots=j.value("completedRoots",0);s.readRecords=j.value("readRecords",int64_t{});s.materializedRecords=j.value("materializedRecords",int64_t{});s.elapsedSeconds=j.value("elapsedSeconds",int64_t{});s.estimatedRecords=j.value("estimatedRecords",int64_t{});s.stage=text(j.value("stage",std::string{}));s.message=text(j.value("message",std::string{}));
+    if(!s.total){SharedInput existing(snapshotName(impl_->data,currentGeneration(impl_->data)));Header h{};if(existing.file!=INVALID_HANDLE_VALUE&&existing.read(&h,sizeof(h))==sizeof(h)&&!memcmp(h.magic,"DFLOWIDX",8)&&h.version==format)s.total=(int64_t)h.total;}
     DWORD pid=j.value("pid",DWORD{});HANDLE p=pid?OpenProcess(SYNCHRONIZE,FALSE,pid):nullptr;if(pid&&((p&&WaitForSingleObject(p,0)==WAIT_OBJECT_0)||(!p&&GetLastError()==ERROR_INVALID_PARAMETER))){s.building=false;s.message=L"索引进程已停止，已有索引可查";s.stage=L"stopped";}if(p)CloseHandle(p);return s;
 }
 void buildCatalogLookup(const fs::path& data,const std::function<bool()>& stopped,const std::function<void(const std::wstring&)>& progress){
     NativeCatalog validated(data);if(!validated.available())throw std::runtime_error("Native snapshot unavailable for lookup construction");
-    Mapping m;m.open(data/L"catalog.index");Header h{};memcpy(&h,m.data,sizeof(h));if(h.generation!=validated.generation()||h.bytes!=m.length)throw std::runtime_error("Native snapshot changed during lookup construction");
+    Mapping m;m.open(validated.snapshotFile());Header h{};memcpy(&h,m.data,sizeof(h));if(h.generation!=validated.generation()||h.bytes!=m.length)throw std::runtime_error("Native snapshot changed during lookup construction");
     lookup(data,m,h,stopped,progress);
 }
 bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& configured,HANDLE stop,HANDLE parent){
@@ -472,7 +524,7 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
             if(std::any_of(roots.begin(),roots.end(),[&](const auto& r){return _wcsicmp(path.c_str(),r.path.c_str())==0;}))continue;
             auto volume=std::make_unique<ntfs::Volume>(path);roots.push_back(volume->info);volumes.push_back(std::move(volume));}
     }catch(...){
-        if(fs::exists(data/L"catalog.index")){std::ofstream disabled(data/L"catalog.disabled");disabled<<"Current roots or permissions require the directory index";}
+        if(fs::exists(data/L"catalog.index")||fs::exists(data/L"catalog.current")){std::ofstream disabled(data/L"catalog.disabled");disabled<<"Current roots or permissions require the directory index";}
         return false;
     }
     DeleteFileW((data/L"catalog.disabled").c_str());
@@ -508,6 +560,10 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
         }catch(...){rebuild=true;}
         publish(true);
         if(rebuild){
+            // Validation may have installed an expired saved cursor before
+            // discovering a journal gap. A fresh MFT snapshot must start at
+            // the current journal head, or it immediately rebuilds again.
+            for(size_t i=0;i<roots.size();++i)roots[i].nextUsn=volumes[i]->info.nextUsn;
             CatalogBuilder builder(data,roots);status.readRecords=0;
             for(uint16_t root=0;root<volumes.size();++root){
                 struct Meta {uint64_t file=0,size=0,modified=0;DWORD attributes=0;uint32_t known=0;};
@@ -546,16 +602,28 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
             reader.available();
             DeleteFileW((data/L"catalog.rebuild").c_str());
         }
-        if(!fs::exists(data/L"catalog.lookup")){status.stage=L"sorts";publish(true);buildCatalogLookup(data,stopped,[&](const auto& step){status.message=step;publish(true);});}
+        if(!fs::exists(lookupName(data,reader.generation()))&&!fs::exists(data/L"catalog.lookup")){status.stage=L"sorts";publish(true);buildCatalogLookup(data,stopped,[&](const auto& step){status.message=step;publish(true);});}
         status.total=(int64_t)reader.total();status.completedRoots=(int)roots.size();status.stage=L"changes";publish(true);
-        auto lastCompaction=GetTickCount64();uint64_t failedUpdates=0;const bool baseLimited=status.limited;
+        auto lastCompaction=GetTickCount64(),lastCleanup=lastCompaction;uint64_t failedUpdates=0;const bool baseLimited=status.limited;
+        auto compactCancelled=std::make_shared<std::atomic<bool>>(false);
+        std::future<std::vector<ntfs::Root>> compaction;
+        struct CancelCompaction {std::shared_ptr<std::atomic<bool>> cancelled;~CancelCompaction(){*cancelled=true;}} cancelCompaction{compactCancelled};
         while(!stopped()){
+            if(compaction.valid()&&compaction.wait_for(std::chrono::milliseconds(0))==std::future_status::ready){
+                // The snapshot records the cursors captured at compaction start.
+                // Replay subsequent USN records instead of losing changes that
+                // arrived while the background snapshot was being constructed.
+                auto checkpoint=compaction.get();
+                MoveFileExW((data/L"catalog.delta").c_str(),(data/L"catalog.delta.previous").c_str(),MOVEFILE_REPLACE_EXISTING);
+                reader.available();for(size_t i=0;i<roots.size();++i)roots[i].nextUsn=checkpoint[i].nextUsn;
+                ++revision;lastCompaction=GetTickCount64();
+            }
             bool changed=false,caughtUp=true;
             for(uint16_t root=0;root<volumes.size();++root){
                 std::vector<ntfs::Change> events;auto next=volumes[root]->changes(roots[root].nextUsn,events);
                 std::set<uint64_t> files;
                 for(const auto& e:events)if(e.file!=roots[root].rootFile&&!ownName(root,e.parent,e.name))files.insert(e.file);
-                bool completeBatch=true;
+                bool completeBatch=true,batchChanged=false;
                 for(auto file:files){
                     if(stopped())throw std::runtime_error("Native indexing stopped");
                     try{
@@ -565,22 +633,31 @@ bool runNativeCatalog(const fs::path& data,const std::vector<std::wstring>& conf
                         auto equal=[&]{if(previous.size()!=entries.size())return false;for(const auto& e:entries)if(std::none_of(previous.begin(),previous.end(),[&](const auto& p){return p.name==e.name&&p.parent==e.parent&&p.size==e.size&&p.modified==e.modified&&p.folder==e.folder&&p.sizeKnown==e.sizeKnown;}))return false;return true;};
                         if(equal())continue;
                         reader.replace(root,file,entries);entries=reader.file(root,file);
-                        appendCatalogChange(data,reader.generation(),root,file,entries);changed=true;
+                        appendCatalogChange(data,reader.generation(),root,file,entries,false);changed=batchChanged=true;
                     }catch(const std::exception&){completeBatch=false;++failedUpdates;status.limited=true;break;}
                 }
                 // Never acknowledge a failed targeted update. Retry the same
                 // bounded journal chunk; do not schedule directory recursion.
+                if(batchChanged)flushCatalogChanges(data);
                 if(completeBatch)roots[root].nextUsn=next;
                 caughtUp&=completeBatch&&roots[root].nextUsn>=volumes[root]->info.nextUsn;
             }
             if(changed)++revision;status.total=(int64_t)reader.total();status.building=!caughtUp;status.complete=caughtUp;status.limited=baseLimited||!caughtUp;
             status.stage=caughtUp?L"ready":L"changes";status.message=L"原生 MFT 索引 · USN 实时更新 · "+std::to_wstring(roots.size())+L" 个卷";
+            if(compaction.valid())status.message+=L" · 后台整理索引，搜索与监控继续";
             if(failedUpdates)status.message+=L" · 定点更新重试 "+std::to_wstring(failedUpdates);
             if(status.limited)status.message+=L" · 存在未还原或待验证项目";publish(changed);
             std::error_code ec;auto logSize=fs::file_size(data/L"catalog.delta",ec);
-            if(!ec&&logSize>128*1024*1024&&GetTickCount64()-lastCompaction>60000){
-                CatalogBuilder compact(data,roots);reader.each([&](const auto& e){compact.add(e);});compact.finish(stopped,[&](const std::wstring& step){status.message=L"压缩增量索引 · "+step;publish();});
-                MoveFileExW((data/L"catalog.delta").c_str(),(data/L"catalog.delta.previous").c_str(),MOVEFILE_REPLACE_EXISTING);reader.available();++revision;lastCompaction=GetTickCount64();
+            if(!compaction.valid()&&GetTickCount64()-lastCleanup>60000){cleanRetiredGenerations(data,reader.generation());lastCleanup=GetTickCount64();}
+            if(!compaction.valid()&&caughtUp&&((!ec&&logSize>32*1024*1024&&GetTickCount64()-lastCompaction>60000)||fs::exists(data/L"catalog.compact"))){
+                DeleteFileW((data/L"catalog.compact").c_str());
+                compaction=std::async(std::launch::async,[data,checkpoint=roots,stopped,compactCancelled]{
+                    auto cancelled=[&]{return compactCancelled->load()||stopped();};
+                    NativeCatalog snapshot(data);if(!snapshot.available())throw std::runtime_error("Compaction snapshot unavailable");
+                    snapshot.file(0,checkpoint.front().rootFile); // Capture committed overlay before streaming.
+                    CatalogBuilder compact(data,checkpoint);snapshot.each([&](const auto& e){if(cancelled())throw std::runtime_error("Native compaction stopped");compact.add(e);});
+                    compact.finish(cancelled,[](const std::wstring&){});return checkpoint;
+                });
             }
             HANDLE waits[]{stop,parent};WaitForMultipleObjects(parent?2:1,waits,FALSE,caughtUp?200:1);
         }

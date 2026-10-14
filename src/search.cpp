@@ -1744,6 +1744,10 @@ struct SearchStore::Impl {
     std::vector<SearchItem> sortedResults;
     explicit Impl(const fs::path& dataDirectory):directory(dataDirectory) {
         native=std::make_unique<NativeCatalog>(directory);
+        // NTFS snapshots do not depend on the legacy SQLite database/WAL.
+        // Open that database lazily only when a directory query needs it.
+        try {if(native->available()){cached=native->status();if(!cached.total)cached.total=(int64_t)native->total();return;}}
+        catch(const std::exception& error) {cached.message=L"原生索引暂不可用："+wide(reinterpret_cast<const unsigned char*>(error.what()));}
         try {database=std::make_unique<Database>(directory,2048,true);sqlite3_busy_timeout(database->value,80);}
         catch(const std::exception& error) {cached.message=L"文件索引无法打开："+wide(reinterpret_cast<const unsigned char*>(error.what()));}
     }
@@ -1892,7 +1896,7 @@ bool stopIndexWorker(const fs::path& directory) {
     } catch(...) {return false;}
 }
 std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit,int64_t beforeId) {
-    if(fs::exists(impl_->directory/L"catalog.index")&&!fs::exists(impl_->directory/L"catalog.disabled")){
+    if((fs::exists(impl_->directory/L"catalog.index")||fs::exists(impl_->directory/L"catalog.current"))&&!fs::exists(impl_->directory/L"catalog.disabled")){
         SearchQuery spec;spec.text=text;spec.sort=SearchSort::Id;spec.descending=true;spec.matchPath=true;if(beforeId>0){SearchItem after;after.id=beforeId;spec.after=after;}return query(spec,limit);
     }
     auto request=++impl_->sequence;
@@ -2045,9 +2049,11 @@ std::vector<SearchItem> SearchStore::query(const std::wstring& text,size_t limit
     return result;
 }
 SearchStatus SearchStore::status() {
+    // Status reads only the shared publication file. A large startup replay
+    // must not hide the real index phase behind the query mutex.
+    try{auto state=impl_->native->status();if(state.roots){std::lock_guard cachedLock(impl_->cachedMutex);impl_->cached=state;return state;}}catch(...){}
     std::unique_lock<std::timed_mutex> lock(impl_->mutex,std::defer_lock);
     if(!lock.try_lock_for(std::chrono::milliseconds(15))) {std::lock_guard cachedLock(impl_->cachedMutex);return impl_->cached;}
-    try{auto state=impl_->native->status();if(state.roots){std::lock_guard cachedLock(impl_->cachedMutex);impl_->cached=state;return state;}}catch(...){}
     if(!impl_->database) {std::lock_guard cachedLock(impl_->cachedMutex);return impl_->cached;}
     try {
         SearchStatus state;DWORD pid=0;

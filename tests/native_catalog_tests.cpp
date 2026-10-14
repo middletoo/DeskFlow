@@ -80,8 +80,28 @@ int wmain(int argc,wchar_t** argv){
         std::thread polling([&]{try{desk::NativeCatalog client(base);for(int i=0;i<4000&&!pollDone;++i){auto s=client.status();if(s.roots!=1)pollFailed=true;}}catch(...){pollFailed=true;}});
         try{for(int i=0;i<500;++i){status.revision=i;desk::catalogStatus(base,status,GetCurrentProcessId(),{root});}}catch(...){pollDone=true;polling.join();throw;}
         pollDone=true;polling.join();require(!pollFailed,"status replacement failed while a reader held the file");
+        // A published snapshot and its lookup stay mapped in another client.
+        // Rebuilding/compacting must switch generations without replacing them.
+        const auto oldSnapshot=reader.snapshotFile();const auto oldGeneration=reader.generation();
+        desk::CatalogBuilder replacement(base,{root});reader.each([&](const auto& e){replacement.add(e);});
+        replacement.add({99000001,101,0,2,2,0,false,true,"after-publication.txt"});
+        replacement.finish([]{return false;},[](const auto&){});
+        desk::SearchQuery published;published.text=L"after-publication";
+        require(complete(reader,published,10,[](const auto& v){return v.name=="after-publication.txt";}).size()==1,"live mapped reader did not switch snapshot generations");
+        require(reader.generation()!=oldGeneration&&fs::exists(oldSnapshot),"publication replaced a mapped snapshot");
+        // Simulate log rotation between a reader's reload and its next poll.
+        fs::rename(base/L"catalog.delta",base/L"catalog.delta.previous");
+        desk::appendCatalogChange(base,reader.generation(),0,99000002,{{99000002,101,0,3,3,0,false,true,"after-rotation.txt"}});
+        published.text=L"after-rotation";require(complete(reader,published,10,[](const auto& v){return v.name=="after-rotation.txt";}).size()==1,"rotated shorter log was ignored");
+        for(int revision=0;revision<6;++revision)for(uint64_t i=0;i<1000;++i){
+            desk::appendCatalogChange(base,reader.generation(),0,100000000+i,{{100000000+i,101,100000000+i,0,1,0,true,false,"temporary-"+std::to_string(i)}},false);
+            desk::appendCatalogChange(base,reader.generation(),0,110000000+i,{{110000000+i,100000000+i,110000000+i,(uint64_t)revision,1,0,false,true,"nested.txt"}},false);
+        }
+        desk::flushCatalogChanges(base);desk::NativeCatalog restarted(base);require(restarted.available(),"restart snapshot unavailable");
+        published.text=L"nested";require(complete(restarted,published,1000,[](const auto& v){return v.name=="nested.txt";}).size()==1000,"coalesced directory replay lost child paths");
+        require(restarted.file(0,110000000)[0].size==5,"coalesced replay kept an intermediate update");
         std::cout<<"PASS native global sorting, full pagination, metadata groups, hardlinks, rename/delete, directory paths and live continuation\n";
-        std::cout<<"rows="<<count+4<<" build_seconds="<<built<<" catalog_bytes="<<fs::file_size(base/L"catalog.index")<<"\n";
+        std::cout<<"rows="<<count+4<<" build_seconds="<<built<<" catalog_bytes="<<fs::file_size(reader.snapshotFile())<<"\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';result=1;}
     std::error_code ec;if(base.parent_path()==fs::temp_directory_path()&&base.filename().wstring().starts_with(L"DeskFlow-native-test-"))fs::remove_all(base,ec);return result;
 }
