@@ -8,11 +8,11 @@
 
 Fixes Windows refusing replacement of mapped indexes while the UI is open, and filename candidates switching before a failed snapshot publication. Snapshot and lookup files now share a generation, published together by atomically switching `catalog.current`; readers can continue using the previous generation. The current and previous generations are retained; older released files are reclaimed. Legacy `catalog.index`/`catalog.lookup` and `files.db` remain compatible.
 
-Restart coalesces updates per file and uses an index of directory children, avoiding replay of every intermediate change and repeated scans of all updates. One actual overnight log contained 392,938 blocks for 168,930 distinct files; the repaired first query took about 1.21 seconds including replay. This does not guarantee cold-cache performance or every log size. Its old filename lookup had a mismatched generation, so complete searches still needed scanning until a matching snapshot/lookup pair was published.
+Restart coalesces updates per file and uses an index of directory children, avoiding replay of every intermediate change and repeated scans of all updates. One actual overnight log contained 392,938 blocks for 168,930 distinct files; the repaired first query slice took about 1.21 seconds including replay. This does not guarantee cold-cache performance or every log size. Its old filename lookup had a mismatched generation, so complete searches still needed scanning until a matching snapshot/lookup pair was published.
 
 Compaction runs in a separate task while USN monitoring continues; changes are replayed from its starting cursor after publication. Update batches are flushed before saving cursors, reducing per-file synchronous writes. Status reads are independent of queries, existing object counts remain visible during replay/builds, and native startup no longer opens the legacy SQLite/WAL.
 
-New regressions cover publication with active mapped readers, paired lookup switches, shorter log rotation and restart after repeated directory/child updates. Background compaction can temporarily increase CPU, I/O and mapped working sets; older resource measurements apply only to their stated versions and conditions.
+New regressions cover publication with active mapped readers, paired lookup switches, shorter log rotation and restart after repeated directory/child updates. A rebuild after a journal gap now starts at the current journal head; it no longer reuses the expired cursor and immediately rebuilds again. Background compaction can temporarily increase CPU, I/O and mapped working sets; older resource measurements apply only to their stated versions and conditions.
 
 ## 0.4.0: native NTFS catalog
 
